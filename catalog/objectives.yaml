@@ -1,0 +1,5 @@
+# Operator-configured business objectives (docs/harness.md). They set monitoring priority only;
+# they supply no relationships. An objective may name a metric that is not registered yet.
+objectives:
+  - {metric_id: orders, priority: 1, good_direction: up}
+  - {metric_id: marketplace_contribution, priority: 1, good_direction: up}

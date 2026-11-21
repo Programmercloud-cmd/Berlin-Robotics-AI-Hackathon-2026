@@ -1,0 +1,27 @@
+# Calendar-period contribution. Components use their own occurrence/booking times, so this is a
+# period accounting identity, not a same-session identity (docs/metrics.md).
+metric_id: marketplace_contribution
+version: 1
+name: Marketplace contribution
+definition: Platform fee revenue minus platform-funded discounts, advertising spend and variable operating cost, per calendar period.
+unit: EUR cents
+population: calendar_period_contribution
+time_semantics: event_time
+dimensions: [country, acquisition_channel]
+supported_granularities: [1h, day]
+source_ids: [contribution]
+calculation:
+  operator: subtract
+  left:
+    operator: subtract
+    left:
+      operator: subtract
+      left: {metric_id: platform_fee_revenue, version: 1}
+      right: {metric_id: platform_funded_discounts, version: 1}
+    right: {metric_id: advertising_spend, version: 1}
+  right: {metric_id: variable_operating_cost, version: 1}
+maturity_delay_seconds: 0
+null_policy: null_on_missing_data
+aggregation_policy: sum
+effective_from: "2026-11-07T00:00:00Z"
+owner: finance

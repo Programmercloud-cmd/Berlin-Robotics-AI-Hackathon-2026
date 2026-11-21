@@ -1,0 +1,113 @@
+# Source metadata published by the observation service (list_sources).
+# This is ordinary producer documentation: schemas, entity keys and dimension names.
+# It contains no graph placement and no causal knowledge.
+#
+# dimension_mapping maps a source-local dimension name to the canonical business dimension,
+# e.g. advertising target_country is the business country (docs/metrics.md).
+
+dimensions:
+  country:                     {description: Customer country (DE, FR)}
+  platform:                    {description: Client platform (Android, Web)}
+  acquisition_channel:         {description: "Immutable session acquisition channel (organic, paid_search, paid_social)"}
+  query_language:              {description: Language of the search query}
+  category:                    {description: Product category}
+  recommendation_model_version: {description: Feed ranking model version}
+  payment_provider:            {description: Payment service provider}
+  checkout_release_version:    {description: Checkout client release that created the attempt}
+  sku_id:                      {description: Stock keeping unit}
+  seller_id:                   {description: Seller}
+  campaign_id:                 {description: Acquisition advertising campaign}
+  source_id:                   {description: Producing data source}
+  event_type:                  {description: Event type within a source}
+
+sources:
+  sessions:
+    description: One row per session with immutable attribution, keyed by session start.
+    entity: session
+    keys: [session_id, campaign_id]
+    time_field: started_at
+    dimensions: [country, platform, acquisition_channel]
+  session_funnel:
+    description: Session-cohort view joining sessions, journey events and confirmed orders by session_id.
+    entity: session
+    keys: [session_id]
+    time_field: started_at
+    dimensions: [country, platform, acquisition_channel]
+    derived_from: [sessions, journey_events, orders]
+  orders:
+    description: Confirmed orders; created atomically with the successful payment attempt.
+    entity: order
+    keys: [order_id, session_id, successful_attempt_id]
+    time_field: confirmed_at
+    dimensions: [country, platform, acquisition_channel]
+  search_requests:
+    description: Search requests with result counts and result clicks.
+    entity: search_request
+    keys: [search_id, session_id]
+    time_field: requested_at
+    dimensions: [country, platform, query_language]
+  feed_events:
+    description: Personalised feed product-card impressions and clicks with stock availability at impression time.
+    entity: feed_impression
+    keys: [impression_id, session_id, sku_id]
+    time_field: occurred_at
+    dimensions: [country, platform, category, recommendation_model_version]
+  payments:
+    description: Finalised payment attempts (success, timeout, other_failure), including retries.
+    entity: payment_attempt
+    keys: [attempt_id, session_id]
+    time_field: finalised_at
+    dimensions: [country, platform, payment_provider, checkout_release_version]
+  inventory_snapshots:
+    description: Point-in-time sellable stock per SKU.
+    entity: sku
+    keys: [sku_id, seller_id]
+    time_field: snapshot_at
+    dimensions: [sku_id, category, seller_id]
+  order_lines:
+    description: Lines of confirmed orders with quantities.
+    entity: order_line
+    keys: [order_id, sku_id, seller_id]
+    time_field: confirmed_at
+    dimensions: [sku_id, category, seller_id]
+  order_economics:
+    description: Per-line commission, platform-funded discount and variable operating cost of confirmed orders.
+    entity: order_line
+    keys: [order_id, sku_id, session_id]
+    time_field: confirmed_at
+    dimensions: [country, platform, category, acquisition_channel]
+  ad_events:
+    description: Acquisition campaign impressions and charged clicks.
+    entity: ad_event
+    keys: [campaign_id]
+    time_field: occurred_at
+    dimensions: [campaign_id, target_country, advertising_channel]
+    dimension_mapping: {target_country: country, advertising_channel: acquisition_channel}
+  campaign_pacing:
+    description: Campaign spend since Berlin midnight against configured daily budgets.
+    entity: campaign
+    keys: [campaign_id]
+    time_field: occurred_at
+    dimensions: [campaign_id, target_country, advertising_channel]
+    dimension_mapping: {target_country: country, advertising_channel: acquisition_channel}
+  contribution:
+    description: Calendar-period marketplace contribution view over order economics and advertising cost.
+    entity: calendar_period
+    keys: []
+    time_field: period_start
+    dimensions: [country, acquisition_channel]
+    derived_from: [order_economics, ad_events]
+  ingestion_receipts:
+    description: Receipt records for every ingested event (event time vs ingestion time).
+    entity: received_record
+    keys: [event_id, source_id]
+    time_field: occurred_at
+    dimensions: [source_id, event_type]
+    role: data_quality
+  source_manifests:
+    description: Producer-declared record counts per closed event-time interval.
+    entity: manifest_interval
+    keys: [source_id]
+    time_field: interval_start
+    dimensions: [source_id, event_type]
+    role: data_quality

@@ -1,0 +1,35 @@
+<!doctype html><html><head><meta charset='utf-8'><title>4 · Where the agent admits doubt</title><style>
+.viz-root{--surface-1:#fcfcfb;--surface-2:#f4f3f0;--text-primary:#0b0b0b;--text-secondary:#52514e;
+ --text-muted:#8a8984;--grid:#e4e3df;--good:#0ca30c;--good-text:#006300;--warning:#fab219;--serious:#ec835a;
+ --critical:#d03b3b;--neutral:#a3a29d;--accent:#2a78d6}
+*{box-sizing:border-box}body{margin:0;background:var(--surface-1);font:14px/1.45 "Segoe UI",system-ui,sans-serif;
+ color:var(--text-primary)}
+.viz-root{padding:28px 36px}
+header{border-bottom:1px solid var(--grid);padding-bottom:12px;margin-bottom:18px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:15px;margin:22px 0 8px;color:var(--text-secondary);font-weight:600}
+.sub{color:var(--text-secondary);font-size:13px}
+.tag{display:inline-block;font-size:12px;padding:1px 8px;border-radius:10px;background:var(--surface-2);
+ color:var(--text-secondary);margin-right:6px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{text-align:left;color:var(--text-secondary);font-weight:600;border-bottom:1px solid var(--grid);padding:6px 8px}
+td{border-bottom:1px solid var(--grid);padding:6px 8px;vertical-align:top}
+td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+code{font:12.5px Consolas,monospace;background:var(--surface-2);padding:1px 4px;border-radius:3px}
+.chip{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;white-space:nowrap}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.legend{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:var(--text-secondary);margin:6px 0 10px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+pre{background:#1a1a19;color:#f0efec;padding:14px 16px;border-radius:6px;font:12.5px/1.5 Consolas,monospace;
+ white-space:pre-wrap;margin:0}
+.kpis{display:flex;gap:14px;margin:4px 0 6px}
+.kpi{background:var(--surface-2);border-radius:8px;padding:10px 16px;min-width:150px}
+.kpi b{display:block;font-size:24px}.kpi small{color:var(--text-secondary)}
+</style></head><body><div class='viz-root'><header><h1>4 · Where the agent admits doubt</h1><div class='sub'>Edges marked needs_review, with the agent&#x27;s own reasons</div><div class='sub' style='margin-top:6px'><span class='tag'>evidence</span>Agent: Brain (person B) · step completed: build &amp; validate the metric graph · data: dev stand-in for Data (dev/fake_data.py) following the Kickoff-spec baseline · monitoring/investigation not built yet</div></header><div class='sub'>6 relationships the agent refused to trust, each with its reason. These stay visible to people instead of being silently used.</div><br><table><thead><tr><th>Status</th><th>Edge</th><th>Reason recorded by the agent</th></tr></thead><tbody><tr><td><span class="chip"><span class="dot" style="background:var(--serious)"></span>! needs review</span></td><td><code>context: service:marketing → acquisition_cost</code></td><td>service &#x27;marketing&#x27; never appears in events</td></tr><tr><td><span class="chip"><span class="dot" style="background:var(--serious)"></span>! needs review</span></td><td><code>context: service:supply-chain → in_stock_rate</code></td><td>service &#x27;supply-chain&#x27; never appears in events</td></tr><tr><td><span class="chip"><span class="dot" style="background:var(--serious)"></span>! needs review</span></td><td><code>context: service:supply-chain → delivered_units</code></td><td>service &#x27;supply-chain&#x27; never appears in events</td></tr><tr><td><span class="chip"><span class="dot" style="background:var(--serious)"></span>! needs review</span></td><td><code>context: service:supply-chain → po_units</code></td><td>service &#x27;supply-chain&#x27; never appears in events</td></tr><tr><td><span class="chip"><span class="dot" style="background:var(--serious)"></span>! needs review</span></td><td><code>causal: platform_discounts → conversion_rate</code></td><td>co-moves (rho=+0.88 at lag 0h on levels (n=52910, grain country/platform/channel)) but confounded by volume: controlling for conversion_rate&#x27;s numerator drops rho to +0.02; the cause tracks the effect&#x27;s own volume</td></tr><tr><td><span class="chip"><span class="dot" style="background:var(--serious)"></span>! needs review</span></td><td><code>causal: pacing_ratio → ad_revenue</code></td><td>co-moves (rho=+1.00 at lag 0h on levels (n=35280, grain advertiser)) but definitional overlap: cause and effect share column(s) [&#x27;spend_eur&#x27;]</td></tr></tbody></table><h2>Console: python -m sentinel.brain bootstrap</h2><pre>29 metrics, 174 edges; validated in 15.1s
+verdicts: {&#x27;formula&#x27;: {&#x27;by_construction&#x27;: 5, &#x27;validated&#x27;: 17}, &#x27;breakdown&#x27;: {&#x27;validated&#x27;: 84}, &#x27;causal&#x27;: {&#x27;weak&#x27;: 1, &#x27;supported&#x27;: 5, &#x27;confounded&#x27;: 2}, &#x27;context&#x27;: {&#x27;validated&#x27;: 56, &#x27;needs_review&#x27;: 4}}
+  ! context:service:marketing-&gt;acquisition_cost: service &#x27;marketing&#x27; never appears in events
+  ! context:service:supply-chain-&gt;in_stock_rate: service &#x27;supply-chain&#x27; never appears in events
+  ! context:service:supply-chain-&gt;delivered_units: service &#x27;supply-chain&#x27; never appears in events
+  ! context:service:supply-chain-&gt;po_units: service &#x27;supply-chain&#x27; never appears in events
+  ! causal:platform_discounts-&gt;conversion_rate: co-moves (rho=+0.88 at lag 0h on levels (n=52910, grain country/platform/channel)) but confounded by volume: controlling for conversion_rate&#x27;s numerator drops rho to +0.02; the cause tracks the effect&#x27;s own volume
+  ! causal:pacing_ratio-&gt;ad_revenue: co-moves (rho=+1.00 at lag 0h on levels (n=35280, grain advertiser)) but definitional overlap: cause and effect share column(s) [&#x27;spend_eur&#x27;]
+saved state\brain_graph.json</pre></div></body></html>

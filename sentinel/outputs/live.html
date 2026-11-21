@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sentinel · live</title>
+<style>
+:root{--bg:#fcfcfb;--panel:#ffffff;--soft:#f4f3f0;--line:#e4e3df;--ink:#0b0b0b;--ink2:#52514e;--muted:#8a8984;
+ --accent:#2a78d6;--good:#0ca30c;--good-ink:#006300;--warn:#fab219;--serious:#ec835a;--crit:#d03b3b;--violet:#6250d6}
+@media (prefers-color-scheme:dark){:root{--bg:#1a1a19;--panel:#222220;--soft:#2b2b29;--line:#383835;--ink:#f0efec;
+ --ink2:#c3c2b7;--muted:#8f8e88;--accent:#3987e5;--good-ink:#3fc23f;--violet:#9085e9}}
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+ font:13px/1.45 "Segoe UI",system-ui,sans-serif}
+header{display:flex;align-items:center;gap:18px;padding:10px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+header h1{font-size:16px;margin:0}header .clock{font:600 15px Consolas,monospace;color:var(--accent)}
+.kpi{color:var(--ink2)}.kpi b{color:var(--ink);font-size:14px}
+main{display:grid;grid-template-columns:minmax(380px,1.15fr) minmax(340px,1fr) minmax(360px,1fr);gap:10px;
+ padding:10px;height:calc(100% - 52px)}
+@media (max-width:1100px){main{grid-template-columns:1fr;height:auto}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:8px;display:flex;flex-direction:column;min-height:0}
+section h2{font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink2);margin:0;padding:9px 12px;
+ border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+.scroll{overflow:auto;flex:1;min-height:0}
+#graph{width:100%;height:100%}
+.legend{display:flex;gap:12px;flex-wrap:wrap;padding:6px 12px;font-size:11.5px;color:var(--ink2);border-top:1px solid var(--line)}
+.legend i{display:inline-block;width:18px;height:0;border-top:2px solid;vertical-align:middle;margin-right:4px}
+.ev{padding:6px 12px;border-bottom:1px solid var(--line)}
+.ev .t{font:11px Consolas,monospace;color:var(--muted);margin-right:6px}
+.tag{display:inline-block;font-size:10.5px;font-weight:600;padding:0 6px;border-radius:9px;margin-right:6px;
+ background:var(--soft);color:var(--ink2)}
+.THOUGHT .tag{background:#e8e4ff;color:#4a3aa7}.ACTION .tag{background:#dbeafe;color:#1c5cab}
+.OBSERVATION .tag{background:#dcfce7;color:#006300}.HYPOTHESIS .tag{background:#fef3c7;color:#8a5a00}
+.ANOMALY_DETECTED .tag{background:#fde2e2;color:#a12626}.FINAL_REPORT .tag{background:#d03b3b;color:#fff}
+.GRAPH_MUTATION .tag,.META_PROPOSAL .tag,.META_RESULT .tag,.DEAD_END .tag{background:#f3e8ff;color:#6b21a8}
+.INNOCENT_CHANGE .tag{background:#e0f2fe;color:#075985}.DATA_ISSUE .tag{background:#fff1d6;color:#8a5a00}
+@media (prefers-color-scheme:dark){.tag{filter:brightness(.92)}}
+.ev .inc{font-size:10.5px;color:var(--accent);margin-right:6px}
+.filters{display:flex;gap:6px}.filters button{font:inherit;font-size:11px;border:1px solid var(--line);background:var(--soft);
+ color:var(--ink2);border-radius:12px;padding:1px 9px;cursor:pointer}.filters button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.inc-card{padding:8px 12px;border-bottom:1px solid var(--line);cursor:pointer}.inc-card:hover{background:var(--soft)}
+.inc-card.sel{background:var(--soft);box-shadow:inset 3px 0 0 var(--accent)}
+.chip{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;margin-right:6px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+#report{padding:10px 14px;font-size:12.5px}#report h2{all:unset;display:block;font-size:15px;font-weight:700;margin:4px 0 8px}
+#report h3{font-size:12.5px;margin:12px 0 4px;color:var(--ink2)}#report ul{margin:0;padding-left:18px}#report li{margin:2px 0}
+#chart{padding:4px 12px}.muted{color:var(--muted)}
+@keyframes pulse{0%{stroke-opacity:1;stroke-width:3}100%{stroke-opacity:.15;stroke-width:9}}
+.focus-ring{animation:pulse 1.1s ease-out infinite}
+</style></head>
+<body>
+<header><h1>Sentinel · agentic monitoring</h1><span class="clock" id="clock">—</span>
+<span class="kpi">anomalies <b id="k-an">0</b></span><span class="kpi">innocent <b id="k-in">0</b></span>
+<span class="kpi">incidents <b id="k-inc">0</b></span><span class="kpi">alerts <b id="k-al">0</b></span>
+<span class="kpi">graph mutations <b id="k-mu">0</b></span><span class="kpi muted" id="status">connecting…</span></header>
+<main>
+<section><h2>Metric graph <span class="muted" id="g-note"></span></h2><div class="scroll"><svg id="graph"></svg></div>
+<div class="legend"><span><i style="border-color:var(--good)"></i>formula · validated</span>
+<span><i style="border-color:var(--muted);border-top-style:dashed"></i>causal · hypothesis</span>
+<span><i style="border-color:var(--serious);border-top-style:dashed"></i>needs review</span>
+<span><i style="border-color:var(--violet);border-top-style:dashed"></i>proposed by meta-agent</span>
+<span><svg width="12" height="12"><circle cx="6" cy="6" r="5" fill="none" stroke="var(--crit)" stroke-width="2"/></svg> investigated now</span></div></section>
+<section><h2>Chain of thought <span class="filters"><button data-f="agent" class="on">agent</button>
+<button data-f="monitor">monitor</button><button data-f="all">all</button></span></h2><div class="scroll" id="feed"></div></section>
+<section><h2>Incidents &amp; reports</h2><div style="max-height:34%;overflow:auto" id="incs"></div>
+<div id="chart"></div><div class="scroll" id="report"><p class="muted">Select an incident.</p></div></section>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+const AGENT=new Set(["THOUGHT","ACTION","OBSERVATION","HYPOTHESIS","DEAD_END","META_PROPOSAL","META_RESULT","GRAPH_MUTATION",
+ "INCIDENT_OPENED","INCIDENT_UPDATED","INCIDENT_RESOLVED","FINAL_REPORT","ANOMALY_DETECTED","INNOCENT_CHANGE","DATA_ISSUE"]);
+const MON=new Set(["MONITOR_TICK","WATCH","ANOMALY_DETECTED","INNOCENT_CHANGE","DATA_ISSUE","SERIES_RECOVERED","SYSTEM"]);
+let filter="agent", events=[], focus=null, visited=new Set(), graph=null, sel=null, counts={an:0,in:0,al:0,mu:0};
+document.querySelectorAll(".filters button").forEach(b=>b.onclick=()=>{filter=b.dataset.f;
+ document.querySelectorAll(".filters button").forEach(x=>x.classList.toggle("on",x===b));renderFeed();});
+const esc=s=>String(s??"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+function text(e){const p=e.payload||{};
+ switch(e.type){
+  case "THOUGHT":return p.text;case "ACTION":return `🔧 ${p.tool}`;case "OBSERVATION":return `<b>${p.evidence_id}</b> ${p.text}`;
+  case "HYPOTHESIS":return p.prediction?`${p.id}: ${p.prediction} → <b>${p.result}</b> (${p.why}) · posterior ${p.posterior??""}`
+                    :`${p.id} ${p.status==="rejected"?"<b>rejected</b>: ":"proposed: "}${p.statement}${p.why?" — "+p.why:""}`;
+  case "ANOMALY_DETECTED":return `${p.metric} [${p.segment||"total"}] ${p.detector} z=${(+p.z).toFixed(1)} · actual ${(+p.actual).toPrecision(4)} vs expected ${(+p.expected).toPrecision(4)} · ${(+p.impact_eur_per_h).toFixed(0)} €/h`;
+  case "INNOCENT_CHANGE":return `${p.metric} [${p.segment||"total"}] explained by plan: ${(p.explained_by||[]).join(", ")}`;
+  case "DATA_ISSUE":return `${p.table} ${p.hour}: completeness ${p.completeness} — ${p.action}`;
+  case "INCIDENT_OPENED":return `opened by ${p.trigger.metric} [${p.trigger.segment||"total"}]`;
+  case "INCIDENT_UPDATED":return p.merged_into?`merged into ${p.merged_into} (${p.why})`:p.attached?`attached ${p.attached}`:`${p.state||""} ${p.label||""} — ${p.why||""}`;
+  case "INCIDENT_RESOLVED":return `resolved (${p.label}) — ${p.why}`;
+  case "FINAL_REPORT":return `${p.kind}: ${p.label} · ${p.first_cause} [${p.segment||"total"}]`;
+  case "GRAPH_MUTATION":case "META_RESULT":case "META_PROPOSAL":return p.summary||p.text;
+  case "DEAD_END":return (p.reasons||[]).join("; ");
+  case "MONITOR_TICK":return `watched ${p.watched_series} series · evaluated ${p.hours_evaluated} hours · held ${p.held_incomplete} incomplete · ${p.anomalies} anomalies`;
+  case "WATCH":return `watch ${p.metric} by ${p.by.join(",")} — ${p.reasons.join("; ")}`;
+  default:return esc(p.message||JSON.stringify(p).slice(0,160));}}
+function keep(e){return filter==="all"||(filter==="agent"?AGENT.has(e.type):MON.has(e.type));}
+function row(e){return `<div class="ev ${e.type}"><span class="t">${(e.sim_ts||"").slice(5,16)}</span>${e.incident_id?`<span class="inc">${e.incident_id}</span>`:""}<span class="tag">${e.type.replace("_"," ").toLowerCase()}</span>${text(e)}</div>`;}
+function renderFeed(){$("#feed").innerHTML=events.filter(keep).slice(-400).reverse().map(row).join("");}
+// ---------------- graph
+async function loadGraph(){graph=await (await fetch("/api/graph")).json();drawGraph();}
+function layout(){const n=graph.nodes,E=graph.edges,depth={};const q=[...graph.roots];q.forEach(r=>depth[r]=0);
+ while(q.length){const c=q.shift();E.filter(e=>e.dst===c).forEach(e=>{if(depth[e.src]===undefined){depth[e.src]=depth[c]+1;q.push(e.src);}});}
+ const maxd=Math.max(0,...Object.values(depth));n.forEach(x=>{if(depth[x.id]===undefined)depth[x.id]=maxd+1;});
+ const layers={};n.forEach(x=>(layers[depth[x.id]]=layers[depth[x.id]]||[]).push(x.id));return {depth,layers};}
+function drawGraph(){const svg=$("#graph"),W=svg.clientWidth||560,{layers}=layout(),pos={};
+ const L=Object.keys(layers).map(Number).sort((a,b)=>a-b),VG=66;
+ L.forEach(d=>{const ids=layers[d];if(d>0)ids.sort((a,b)=>px(a)-px(b));ids.forEach((id,i)=>pos[id]=[W*(i+1)/(ids.length+1),30+d*VG]);});
+ function px(id){const xs=graph.edges.filter(e=>e.src===id&&pos[e.dst]).map(e=>pos[e.dst][0]);return xs.length?xs.reduce((a,b)=>a+b)/xs.length:W;}
+ const H=60+(L.length)*VG;svg.setAttribute("viewBox",`0 0 ${W} ${H}`);svg.style.height=H+"px";
+ const col=e=>e.status==="needs_review"?"var(--serious)":e.status==="proposed"?"var(--violet)":e.status==="validated"?(e.type==="formula"?"var(--good)":"var(--accent)"):"var(--muted)";
+ let s=`<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0L10,5L0,10z" fill="var(--muted)"/></marker></defs>`;
+ graph.edges.forEach(e=>{if(!pos[e.src]||!pos[e.dst])return;const [x1,y1]=pos[e.src],[x2,y2]=pos[e.dst],my=(y1+y2)/2;
+  const hot=visited.has(e.src)&&visited.has(e.dst);
+  s+=`<path d="M${x1},${y1-12} C${x1},${my} ${x2},${my} ${x2},${y2+12}" fill="none" stroke="${hot?"var(--crit)":col(e)}" stroke-width="${hot?3:1.6}" ${e.type==="causal"?'stroke-dasharray="5 4"':""} marker-end="url(#ah)" opacity="${hot?1:.75}"><title>${esc(e.type+": "+e.src+" → "+e.dst+" · "+e.status+" · "+(e.reason||""))}</title></path>`;});
+ graph.nodes.forEach(n=>{const [x,y]=pos[n.id],w=Math.max(70,n.id.length*6.4+12),isF=n.id===focus,vis=visited.has(n.id),meta=n.owner==="meta-agent";
+  s+=`<g><title>${esc(n.name+" · "+n.kind+" · dims: "+n.dimensions.join(", "))}</title>
+  ${isF?`<rect class="focus-ring" x="${x-w/2-4}" y="${y-16}" width="${w+8}" height="32" rx="9" fill="none" stroke="var(--crit)"/>`:""}
+  <rect x="${x-w/2}" y="${y-12}" width="${w}" height="24" rx="6" fill="${vis?"#fde2e2":meta?"#f3e8ff":"var(--panel)"}" stroke="${vis?"var(--crit)":meta?"var(--violet)":"var(--line)"}" stroke-width="${vis||meta?2:1.2}"/>
+  <text x="${x}" y="${y+4}" text-anchor="middle" font-size="11" fill="${vis?"#7f1d1d":"var(--ink)"}" font-weight="${graph.roots.includes(n.id)?700:500}">${esc(n.id)}</text></g>`;});
+ svg.innerHTML=s;$("#g-note").textContent=`${graph.nodes.length} metrics · ${graph.edges.length} edges`;}
+// ---------------- incidents
+const STATE_COL={alerted:"var(--crit)",investigating:"var(--warn)",monitoring:"var(--accent)",resolved:"var(--good)",reopened:"var(--crit)",detected:"var(--warn)"};
+async function loadIncs(){const incs=await (await fetch("/api/incidents")).json();$("#k-inc").textContent=incs.length;
+ $("#incs").innerHTML=incs.slice().reverse().map(i=>`<div class="inc-card ${sel===i.id?"sel":""}" data-id="${i.id}">
+ <span class="chip"><span class="dot" style="background:${STATE_COL[i.state]||"var(--muted)"}"></span>${i.state}</span>
+ <b>${i.id}</b> ${i.label||""} · ${i.first_cause||"…"} <span class="muted">[${i.segment||"total"}]</span>
+ ${i.impact_eur_total?`<span class="muted"> · ${(+i.impact_eur_total).toFixed(0)} €</span>`:""}</div>`).join("");
+ document.querySelectorAll(".inc-card").forEach(c=>c.onclick=()=>{sel=c.dataset.id;showInc(incs.find(x=>x.id===sel));loadIncs();});
+ if(sel){const i=incs.find(x=>x.id===sel);if(i)showInc(i,true);}}
+function md(s){return esc(s).replace(/^## (.*)$/gm,"<h2>$1</h2>").replace(/^### (.*)$/gm,"<h3>$1</h3>")
+ .replace(/\*\*(.+?)\*\*/g,"<b>$1</b>").replace(/^(\s*)- (.*)$/gm,(m,sp,t)=>`<li style="margin-left:${sp.length*8}px">${t}</li>`).replace(/\n\n/g,"<br>");}
+async function showInc(i,quiet){$("#report").innerHTML=i.report_md?md(i.report_md):"<p class='muted'>investigating…</p>";
+ if(!i.first_cause)return;const rows=await (await fetch(`/api/series?metric=${i.first_cause}&segment=${encodeURIComponent(i.segment)}`)).json();
+ chart(rows,`${i.first_cause} [${i.segment||"total"}]`);}
+function chart(rows,title){if(!rows.length){$("#chart").innerHTML=`<p class="muted">${esc(title)}: series not monitored at this grain yet</p>`;return;}
+ const W=$("#chart").clientWidth-24||340,H=120,P=28,ys=rows.flatMap(r=>[r.actual,r.low,r.high]).filter(Number.isFinite),
+ lo=Math.min(...ys),hi=Math.max(...ys),x=i=>P+i*(W-P-6)/Math.max(1,rows.length-1),y=v=>H-18-(v-lo)/(hi-lo||1)*(H-30);
+ const band=rows.map((r,i)=>`${x(i)},${y(r.high)}`).join(" ")+" "+rows.map((r,i)=>`${x(rows.length-1-i)},${y(rows[rows.length-1-i].low)}`).join(" ");
+ const line=k=>rows.map((r,i)=>`${i?"L":"M"}${x(i)},${y(r[k])}`).join("");
+ $("#chart").innerHTML=`<div class="muted" style="font-size:11.5px">${esc(title)} · actual vs expected band (4σ)</div><svg width="${W}" height="${H}">
+ <polygon points="${band}" fill="var(--accent)" opacity=".13"/><path d="${line("expected")}" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="4 3"/>
+ <path d="${line("actual")}" fill="none" stroke="var(--ink)" stroke-width="2"/>
+ ${rows.map((r,i)=>Math.abs(r.z)>=4.5?`<circle cx="${x(i)}" cy="${y(r.actual)}" r="4" fill="var(--crit)"><title>${r.ts} z=${(+r.z).toFixed(1)}</title></circle>`:"").join("")}
+ <text x="${P}" y="${H-3}" font-size="10" fill="var(--muted)">${rows[0].ts.slice(5,16)}</text><text x="${W-6}" y="${H-3}" font-size="10" text-anchor="end" fill="var(--muted)">${rows[rows.length-1].ts.slice(5,16)}</text></svg>`;}
+// ---------------- stream
+const pend={};function soon(f){const k=f.name;if(!pend[k]){pend[k]=1;setTimeout(()=>{pend[k]=0;f();},250);}}
+const es=new EventSource("/api/stream?since=0");
+es.onopen=()=>$("#status").textContent="live";
+es.addEventListener("done",()=>{$("#status").textContent="run finished";});
+es.onmessage=m=>{const e=JSON.parse(m.data);events.push(e);if(e.sim_ts)$("#clock").textContent=e.sim_ts.slice(0,16);
+ const p=e.payload||{};
+ if(e.type==="ANOMALY_DETECTED")$("#k-an").textContent=++counts.an;
+ if(e.type==="INNOCENT_CHANGE")$("#k-in").textContent=++counts.in;
+ if(e.type==="FINAL_REPORT"&&p.kind==="alert")$("#k-al").textContent=++counts.al;
+ if(e.type==="GRAPH_MUTATION"){$("#k-mu").textContent=++counts.mu;loadGraph();}
+ if(e.type==="INCIDENT_OPENED"){visited=new Set([p.trigger.metric]);focus=p.trigger.metric;sel=e.incident_id;}
+ if(["THOUGHT","ACTION","OBSERVATION"].includes(e.type)&&p.focus){focus=p.focus;visited.add(p.focus);}
+ if(e.type==="THOUGHT"&&p.stage==="conclude")focus=null;
+ if(["INCIDENT_OPENED","INCIDENT_UPDATED","INCIDENT_RESOLVED","FINAL_REPORT"].includes(e.type))soon(loadIncs);
+ if(graph&&["THOUGHT","ACTION","OBSERVATION","INCIDENT_OPENED"].includes(e.type))soon(drawGraph);
+ soon(renderFeed);};
+loadGraph();loadIncs();window.onresize=()=>graph&&drawGraph();
+</script></body></html>

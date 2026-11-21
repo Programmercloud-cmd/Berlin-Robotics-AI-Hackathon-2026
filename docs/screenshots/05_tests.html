@@ -1,0 +1,43 @@
+<!doctype html><html><head><meta charset='utf-8'><title>5 · Automated checks</title><style>
+.viz-root{--surface-1:#fcfcfb;--surface-2:#f4f3f0;--text-primary:#0b0b0b;--text-secondary:#52514e;
+ --text-muted:#8a8984;--grid:#e4e3df;--good:#0ca30c;--good-text:#006300;--warning:#fab219;--serious:#ec835a;
+ --critical:#d03b3b;--neutral:#a3a29d;--accent:#2a78d6}
+*{box-sizing:border-box}body{margin:0;background:var(--surface-1);font:14px/1.45 "Segoe UI",system-ui,sans-serif;
+ color:var(--text-primary)}
+.viz-root{padding:28px 36px}
+header{border-bottom:1px solid var(--grid);padding-bottom:12px;margin-bottom:18px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:15px;margin:22px 0 8px;color:var(--text-secondary);font-weight:600}
+.sub{color:var(--text-secondary);font-size:13px}
+.tag{display:inline-block;font-size:12px;padding:1px 8px;border-radius:10px;background:var(--surface-2);
+ color:var(--text-secondary);margin-right:6px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{text-align:left;color:var(--text-secondary);font-weight:600;border-bottom:1px solid var(--grid);padding:6px 8px}
+td{border-bottom:1px solid var(--grid);padding:6px 8px;vertical-align:top}
+td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+code{font:12.5px Consolas,monospace;background:var(--surface-2);padding:1px 4px;border-radius:3px}
+.chip{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;white-space:nowrap}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.legend{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:var(--text-secondary);margin:6px 0 10px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+pre{background:#1a1a19;color:#f0efec;padding:14px 16px;border-radius:6px;font:12.5px/1.5 Consolas,monospace;
+ white-space:pre-wrap;margin:0}
+.kpis{display:flex;gap:14px;margin:4px 0 6px}
+.kpi{background:var(--surface-2);border-radius:8px;padding:10px 16px;min-width:150px}
+.kpi b{display:block;font-size:24px}.kpi small{color:var(--text-secondary)}
+</style></head><body><div class='viz-root'><header><h1>5 · Automated checks</h1><div class='sub'>pytest -v tests/test_brain_graph.py (Brain graph + the Data stand-in)</div><div class='sub' style='margin-top:6px'><span class='tag'>evidence</span>Agent: Brain (person B) · step completed: build &amp; validate the metric graph · data: dev stand-in for Data (dev/fake_data.py) following the Kickoff-spec baseline · monitoring/investigation not built yet</div></header><pre>============================= test session starts =============================
+platform win32 -- Python 3.11.2, pytest-9.1.1, pluggy-1.7.0 -- C:\Users\Wang Yijun\AppData\Local\Programs\Python\Python311\python.exe
+rootdir: D:\Hackthon\Hackthon_Berlin
+plugins: anyio-4.15.0
+collecting ... collected 11 items
+tests/test_brain_graph.py::test_seed_structure PASSED                    [  9%]
+tests/test_brain_graph.py::test_formula_cycle_rejected PASSED            [ 18%]
+tests/test_brain_graph.py::test_driver_tree_is_split_review_item_2 PASSED [ 27%]
+tests/test_brain_graph.py::test_seed_formulas_validate PASSED            [ 36%]
+tests/test_brain_graph.py::test_wrong_formula_needs_review PASSED        [ 45%]
+tests/test_brain_graph.py::test_causal_verdicts PASSED                   [ 54%]
+tests/test_brain_graph.py::test_wrong_sign_contradicted PASSED           [ 63%]
+tests/test_brain_graph.py::test_baseline_keyed_in_local_time_across_dst PASSED [ 72%]
+tests/test_brain_graph.py::test_roundtrip_and_tree PASSED                [ 81%]
+tests/test_brain_graph.py::test_fake_data_baseline PASSED                [ 90%]
+tests/test_brain_graph.py::test_fake_data_late_partition_and_fault PASSED [100%]
+============================= 11 passed in 19.50s =============================</pre></div></body></html>

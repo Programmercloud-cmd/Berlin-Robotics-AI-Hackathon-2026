@@ -1,0 +1,89 @@
+# Seed metric nodes as contracts.MetricNode — 29 metrics + avg_order_value.
+# Convention: a column qualified with another
+# table, e.g. SUM(fact_traffic.sessions), is evaluated on that table and joined on ts + dimensions.
+# A node without SQL (contribution) is computed from its formula.
+
+- {id: contribution, name: Contribution, kind: sum, unit: eur, table: "", dimensions: [country], owner: finance,
+   description: "marketplace_fees + ad_revenue - platform_discounts - acquisition_cost - payment_costs"}
+- {id: marketplace_fees, name: Marketplace fees, kind: sum, unit: eur, table: fact_commerce, value_sql: "SUM(fees_eur)",
+   dimensions: [country, platform, channel, category], owner: finance, description: Take-rate fees charged on orders}
+- {id: take_rate, name: Take rate, kind: ratio, unit: share, table: fact_commerce, numerator_sql: "SUM(fees_eur)",
+   denominator_sql: "SUM(gmv_eur)", dimensions: [country, platform, channel, category], owner: finance,
+   description: Fees as share of GMV}
+- {id: gmv, name: GMV, kind: sum, unit: eur, table: fact_commerce, value_sql: "SUM(gmv_eur)",
+   dimensions: [country, platform, channel, category], owner: finance, description: Gross merchandise value of orders}
+- {id: avg_order_value, name: Average order value, kind: ratio, unit: eur, table: fact_commerce,
+   numerator_sql: "SUM(gmv_eur)", denominator_sql: "SUM(orders)", dimensions: [country, platform, channel, category],
+   owner: finance, description: GMV per order (connects orders to contribution)}
+- {id: platform_discounts, name: Platform discounts, kind: sum, unit: eur, table: fact_commerce,
+   value_sql: "SUM(discounts_eur)", dimensions: [country, platform, channel, category], good_direction: down,
+   owner: finance, description: Discounts funded by Shoply}
+- {id: ad_revenue, name: Ad revenue, kind: sum, unit: eur, table: fact_ads, value_sql: "SUM(spend_eur)",
+   dimensions: [country, advertiser], services: [ads-pacing], owner: ads, description: Sponsored-product spend by sellers}
+- {id: acquisition_cost, name: Acquisition cost, kind: sum, unit: eur, table: fact_traffic,
+   value_sql: "SUM(acquisition_cost_eur)", dimensions: [country, platform, channel], good_direction: down,
+   services: [marketing], owner: marketing, description: Cost of paid acquisition traffic}
+- {id: payment_costs, name: Payment costs, kind: sum, unit: eur, table: fact_commerce, value_sql: "SUM(payment_costs_eur)",
+   dimensions: [country, platform, channel, category], good_direction: down, owner: payments,
+   description: "PSP costs: 1.4% of GMV plus EUR 0.10 per checkout"}
+- {id: sessions, name: Sessions, kind: count, unit: count, table: fact_traffic, value_sql: "SUM(sessions)",
+   dimensions: [country, platform, channel], services: [app-android, app-ios, web-frontend], owner: growth,
+   description: Visits}
+- {id: product_views, name: Product views, kind: count, unit: count, table: fact_commerce,
+   value_sql: "SUM(search_views + feed_views + direct_views)", dimensions: [country, platform, channel, category],
+   owner: growth, description: Product detail views from search, feed and direct navigation}
+- {id: view_rate, name: View rate, kind: ratio, unit: score, table: fact_commerce,
+   numerator_sql: "SUM(search_views + feed_views + direct_views)", denominator_sql: "SUM(fact_traffic.sessions)",
+   dimensions: [country, platform, channel], services: [app-android, app-ios, web-frontend], owner: growth,
+   description: Product views per session}
+- {id: add_to_cart_rate, name: Add-to-cart rate, kind: ratio, unit: share, table: fact_commerce,
+   numerator_sql: "SUM(carts)", denominator_sql: "SUM(search_views + feed_views + direct_views)",
+   dimensions: [country, platform, channel, category], services: [app-android, app-ios, web-frontend],
+   owner: growth, description: Carts per product view}
+- {id: checkout_rate, name: Checkout rate, kind: ratio, unit: share, table: fact_commerce,
+   numerator_sql: "SUM(checkouts)", denominator_sql: "SUM(carts)", dimensions: [country, platform, channel, category],
+   services: [app-android, app-ios, web-frontend], owner: commerce, description: Checkouts per cart}
+- {id: payment_success_rate, name: Payment success rate, kind: ratio, unit: share, table: fact_commerce,
+   numerator_sql: "SUM(orders)", denominator_sql: "SUM(checkouts)", dimensions: [country, platform, channel, category],
+   services: [payments-android, payments-ios, payments-web], owner: payments, description: Orders per checkout}
+- {id: orders, name: Orders, kind: count, unit: count, table: fact_commerce, value_sql: "SUM(orders)",
+   dimensions: [country, platform, channel, category], owner: commerce, description: Paid orders}
+- {id: conversion_rate, name: Conversion rate, kind: ratio, unit: share, table: fact_commerce,
+   numerator_sql: "SUM(orders)", denominator_sql: "SUM(fact_traffic.sessions)", dimensions: [country, platform, channel],
+   owner: growth, description: Orders per session}
+- {id: searches, name: Searches, kind: count, unit: count, table: fact_traffic, value_sql: "SUM(searches)",
+   dimensions: [country, platform, channel], services: [search], owner: search, description: Search requests}
+- {id: search_ctr, name: Search CTR, kind: ratio, unit: score, table: fact_commerce,
+   numerator_sql: "SUM(search_views)", denominator_sql: "SUM(fact_traffic.searches)",
+   dimensions: [country, platform, channel], services: [search], owner: search,
+   description: Product views from search per search}
+- {id: search_relevance, name: Search relevance, kind: gauge, unit: score, table: fact_traffic,
+   numerator_sql: "SUM(relevance_sum)", denominator_sql: "SUM(relevance_n)", dimensions: [country, platform],
+   services: [search], owner: search, description: Mean relevance score of search results}
+- {id: direct_views, name: Direct views, kind: count, unit: count, table: fact_commerce, value_sql: "SUM(direct_views)",
+   dimensions: [country, platform, channel, category], owner: growth, description: Product views not from search or feed}
+- {id: feed_impressions, name: Feed impressions, kind: count, unit: count, table: fact_commerce,
+   value_sql: "SUM(feed_impressions)", dimensions: [country, platform, category], services: [recs-model],
+   owner: recommendations, description: For You feed product-card impressions}
+- {id: feed_ctr, name: Feed CTR, kind: ratio, unit: share, table: fact_commerce, numerator_sql: "SUM(feed_views)",
+   denominator_sql: "SUM(feed_impressions)", dimensions: [country, platform, category], services: [recs-model],
+   owner: recommendations, description: Feed views per feed impression}
+- {id: feed_purchase_rate, name: Feed purchase rate, kind: ratio, unit: share, table: fact_commerce,
+   numerator_sql: "SUM(feed_orders)", denominator_sql: "SUM(feed_views)", dimensions: [country, platform, category],
+   services: [recs-model], owner: recommendations, description: Orders per feed view}
+- {id: in_stock_rate, name: In-stock rate, kind: gauge, unit: share, table: fact_inventory,
+   numerator_sql: "SUM(in_stock * demand_weight)", denominator_sql: "SUM(demand_weight)", dimensions: [category],
+   services: [supply-chain], owner: supply, description: Demand-weighted share of SKUs in stock}
+- {id: delivered_units, name: Delivered units, kind: count, unit: count, table: fact_inventory,
+   value_sql: "SUM(delivered_units)", dimensions: [category], services: [supply-chain], owner: supply,
+   description: Units received from suppliers}
+- {id: po_units, name: PO units, kind: count, unit: count, table: fact_inventory, value_sql: "SUM(po_units)",
+   dimensions: [category], services: [supply-chain], owner: supply, description: Units ordered from suppliers}
+- {id: sponsored_clicks, name: Sponsored clicks, kind: count, unit: count, table: fact_ads, value_sql: "SUM(clicks)",
+   dimensions: [country, advertiser], services: [ads-pacing], owner: ads, description: Clicks on sponsored products}
+- {id: avg_cpc, name: Average CPC, kind: ratio, unit: eur, table: fact_ads, numerator_sql: "SUM(spend_eur)",
+   denominator_sql: "SUM(clicks)", dimensions: [country, advertiser], services: [ads-pacing], owner: ads,
+   description: Spend per sponsored click}
+- {id: pacing_ratio, name: Pacing ratio, kind: gauge, unit: score, table: fact_ads, numerator_sql: "SUM(spend_eur)",
+   denominator_sql: "SUM(planned_spend_eur)", dimensions: [advertiser], services: [ads-pacing], owner: ads,
+   description: "Spend vs planned spend, hourly (hourly definition)"}

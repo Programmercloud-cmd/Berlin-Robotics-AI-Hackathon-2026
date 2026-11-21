@@ -1,0 +1,20 @@
+# Registered live during the demo (T+135), while the payment incident is open.
+metric_id: payment_timeout_rate
+version: 1
+name: Payment timeout rate
+definition: Fraction of finalised payment attempts ending in timeout.
+unit: ratio
+population: finalised_payment_attempts_by_finalisation_time
+time_semantics: event_time
+dimensions: [country, platform, payment_provider, checkout_release_version]
+supported_granularities: [5m, 15m, 1h]
+source_ids: [payments]
+calculation:
+  operator: divide
+  left: {metric_id: payment_timeouts, version: 1}
+  right: {metric_id: payment_attempts, version: 1}
+maturity_delay_seconds: 0
+null_policy: null_on_zero_denominator
+aggregation_policy: ratio_of_sums
+effective_from: "2026-11-07T00:00:00Z"
+owner: payments

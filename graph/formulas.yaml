@@ -1,0 +1,17 @@
+# Seed formulas: one expression per output; every name becomes a formula edge.
+- output: contribution
+  expr: marketplace_fees + ad_revenue - platform_discounts - acquisition_cost - payment_costs
+- output: marketplace_fees
+  expr: gmv * take_rate
+- output: gmv
+  expr: orders * avg_order_value
+- output: orders
+  expr: sessions * conversion_rate
+- output: conversion_rate
+  expr: view_rate * add_to_cart_rate * checkout_rate * payment_success_rate
+- output: view_rate
+  expr: product_views / sessions
+- output: product_views
+  expr: searches * search_ctr + feed_impressions * feed_ctr + direct_views
+- output: ad_revenue
+  expr: sponsored_clicks * avg_cpc

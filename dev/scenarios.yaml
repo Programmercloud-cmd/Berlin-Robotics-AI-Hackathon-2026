@@ -1,0 +1,44 @@
+# Demo timeline for the simulated marketplace.
+# Used only by dev/fake_data.py. `optional: true` marks scenarios that are off by default.
+- id: autumn_campaign            # innocent change
+  start: 2026-10-26T08:00Z
+  end:   2026-10-27T08:00Z
+  scope: {channel: paid}
+  effects: {sessions: 1.4, add_to_cart_rate: 0.85}     # low-intent visitors
+  event: {type: campaign, planned: true, expected_effect: {sessions: 1.4}}
+
+- id: late_partition             # data issue
+  start: 2026-10-26T13:00Z
+  end:   2026-10-26T14:00Z
+  table: fact_commerce
+  effects: {completeness: 0.6}   # the rest arrives one tick later
+
+- id: android_payment_de         # main fault
+  start: 2026-10-26T15:00Z
+  end:   2026-10-26T21:00Z
+  scope: {country: de, platform: android}
+  effects: {payment_success_rate: 0.755}               # 94% -> 71%
+  event: {type: release, service: payments-android, description: "5.12 rollout"}
+  end_event: {type: release, service: payments-android, description: "rollback to 5.11"}
+
+- id: ios_release                # red herring, no effect
+  start: 2026-10-26T15:00Z
+  event: {type: release, service: app-ios, description: "7.3 rollout"}
+
+- id: for_you_model_shift        # fault, after the new metric is added live
+  start: 2026-10-27T10:00Z
+  scope: {channel: for_you}
+  effects: {oos_exposure_share: 0.35, feed_ctr: 1.2}
+  event: {type: release, service: recs-model, description: "model v42"}
+
+- id: supplier_delay_electronics # optional, no event logged
+  optional: true
+  start: 2026-10-24T00:00Z
+  scope: {category: electronics}
+  effects: {delivery_lag_days: 6}
+
+- id: pacing_bug                 # optional
+  optional: true
+  start: 2026-10-28T00:00Z
+  scope: {advertiser: adv_017}
+  effects: {pacing_controller: "off"}

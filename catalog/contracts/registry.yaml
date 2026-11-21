@@ -1,0 +1,422 @@
+# Initial metric registry: 33 of the 36 catalog metrics (docs/metrics.md, plan/jacob).
+# Each entry is a contributor metric contract (docs/interface.md). Contracts carry meaning and access
+# (definition, unit, population, time semantics, dimensions, query or calculation) — never a graph
+# parent, an edge, a threshold or a scenario. `defaults` are merged into every contract.
+#
+# Held back for live registration during the demo: catalog/contracts/holdback/*.yaml
+#   payment_timeout_rate, unavailable_feed_share, marketplace_contribution
+
+defaults:
+  version: 1
+  effective_from: "2026-11-07T00:00:00Z"
+  supported_granularities: [5m, 15m, 1h, day]
+  maturity_delay_seconds: 0
+  null_policy: null_on_missing_data
+
+metrics:
+  # ---------------------------------------------------------------- journey
+  - metric_id: sessions
+    name: Sessions
+    definition: Distinct session IDs, bucketed by session start.
+    unit: count
+    population: sessions_by_session_start
+    time_semantics: session_cohort
+    dimensions: [country, platform, acquisition_channel]
+    source_ids: [sessions]
+    query_ref: sessions.count_distinct_sessions
+    aggregation_policy: sum
+    maturity_delay_seconds: 900
+    owner: growth
+  - metric_id: product_view_sessions
+    name: Product-view sessions
+    definition: Sessions in the start cohort with at least one product view.
+    unit: count
+    population: sessions_with_product_view_by_session_start
+    time_semantics: session_cohort
+    dimensions: [country, platform, acquisition_channel]
+    source_ids: [session_funnel]
+    query_ref: session_funnel.sessions_with_view
+    aggregation_policy: sum
+    maturity_delay_seconds: 900
+    owner: growth
+  - metric_id: add_to_cart_sessions
+    name: Add-to-cart sessions
+    definition: Sessions in the start cohort with at least one cart addition.
+    unit: count
+    population: sessions_with_cart_add_by_session_start
+    time_semantics: session_cohort
+    dimensions: [country, platform, acquisition_channel]
+    source_ids: [session_funnel]
+    query_ref: session_funnel.sessions_with_cart_add
+    aggregation_policy: sum
+    maturity_delay_seconds: 900
+    owner: growth
+  - metric_id: checkout_sessions
+    name: Checkout sessions
+    definition: Sessions in the start cohort that started checkout.
+    unit: count
+    population: sessions_with_checkout_by_session_start
+    time_semantics: session_cohort
+    dimensions: [country, platform, acquisition_channel]
+    source_ids: [session_funnel]
+    query_ref: session_funnel.sessions_with_checkout
+    aggregation_policy: sum
+    maturity_delay_seconds: 900
+    owner: growth
+  - metric_id: orders
+    name: Confirmed orders
+    definition: Confirmed orders, bucketed by confirmation time. An order is confirmed only after a successful payment.
+    unit: count
+    population: confirmed_orders_by_confirmation_time
+    time_semantics: event_time
+    dimensions: [country, platform, acquisition_channel]
+    source_ids: [orders]
+    query_ref: orders.count_confirmed
+    aggregation_policy: sum
+    owner: commerce
+  - metric_id: session_conversion_rate
+    name: Session conversion rate
+    definition: Converted sessions divided by sessions, in the same mature session start cohort.
+    unit: ratio
+    population: sessions_by_session_start
+    time_semantics: session_cohort
+    dimensions: [country, platform, acquisition_channel]
+    source_ids: [session_funnel]
+    query_ref: session_funnel.converted_over_sessions
+    aggregation_policy: ratio_of_sums
+    null_policy: null_on_zero_denominator
+    maturity_delay_seconds: 900
+    owner: growth
+  - metric_id: checkout_completion_rate
+    name: Checkout completion rate
+    definition: Converted checkout sessions divided by checkout sessions, in the same mature session start cohort.
+    unit: ratio
+    population: sessions_with_checkout_by_session_start
+    time_semantics: session_cohort
+    dimensions: [country, platform, acquisition_channel]
+    source_ids: [session_funnel]
+    query_ref: session_funnel.converted_over_checkout_sessions
+    aggregation_policy: ratio_of_sums
+    null_policy: null_on_zero_denominator
+    maturity_delay_seconds: 900
+    owner: commerce
+
+  # ---------------------------------------------------------------- search
+  - metric_id: searches
+    name: Searches
+    definition: Search requests, bucketed by request time.
+    unit: count
+    population: search_requests_by_request_time
+    time_semantics: event_time
+    dimensions: [country, platform, query_language]
+    source_ids: [search_requests]
+    query_ref: search_requests.count
+    aggregation_policy: sum
+    owner: search
+  - metric_id: searches_with_click
+    name: Searches with click
+    definition: Search requests with at least one result click within 2 minutes, bucketed by request time.
+    unit: count
+    population: search_requests_with_click_by_request_time
+    time_semantics: event_time
+    dimensions: [country, platform, query_language]
+    source_ids: [search_requests]
+    query_ref: search_requests.count_with_click
+    aggregation_policy: sum
+    maturity_delay_seconds: 120
+    owner: search
+  - metric_id: zero_result_searches
+    name: Zero-result searches
+    definition: Search requests returning zero results.
+    unit: count
+    population: search_requests_with_zero_results_by_request_time
+    time_semantics: event_time
+    dimensions: [country, platform, query_language]
+    source_ids: [search_requests]
+    query_ref: search_requests.count_zero_results
+    aggregation_policy: sum
+    owner: search
+  - metric_id: search_click_rate
+    name: Search click rate
+    definition: Searches with a result click divided by searches; mature 2 minutes after the bucket.
+    unit: ratio
+    population: search_requests_by_request_time
+    time_semantics: event_time
+    dimensions: [country, platform, query_language]
+    source_ids: [search_requests]
+    calculation:
+      operator: divide
+      left: {metric_id: searches_with_click, version: 1}
+      right: {metric_id: searches, version: 1}
+    aggregation_policy: ratio_of_sums
+    null_policy: null_on_zero_denominator
+    maturity_delay_seconds: 120
+    owner: search
+
+  # ---------------------------------------------------------------- feed
+  - metric_id: feed_impressions
+    name: Feed impressions
+    definition: Product-card impressions in the personalised feed.
+    unit: count
+    population: feed_impressions_by_impression_time
+    time_semantics: event_time
+    dimensions: [country, platform, category, recommendation_model_version]
+    source_ids: [feed_events]
+    query_ref: feed_events.count_impressions
+    aggregation_policy: sum
+    owner: recommendations
+  - metric_id: feed_clicks
+    name: Feed clicks
+    definition: Click events referencing a prior feed impression, bucketed by click time.
+    unit: count
+    population: feed_clicks_by_click_time
+    time_semantics: event_time
+    dimensions: [country, platform, category, recommendation_model_version]
+    source_ids: [feed_events]
+    query_ref: feed_events.count_clicks
+    aggregation_policy: sum
+    owner: recommendations
+  - metric_id: unavailable_feed_impressions
+    name: Unavailable feed impressions
+    definition: Feed impressions of products with zero sellable stock at impression time.
+    unit: count
+    population: feed_impressions_with_zero_stock_by_impression_time
+    time_semantics: event_time
+    dimensions: [country, platform, category, recommendation_model_version]
+    source_ids: [feed_events]
+    query_ref: feed_events.count_unavailable_impressions
+    aggregation_policy: sum
+    owner: recommendations
+
+  # ---------------------------------------------------------------- payment
+  - metric_id: payment_attempts
+    name: Payment attempts
+    definition: Finalised payment attempts including retries, bucketed by finalisation time. Pending attempts excluded.
+    unit: count
+    population: finalised_payment_attempts_by_finalisation_time
+    time_semantics: event_time
+    dimensions: [country, platform, payment_provider, checkout_release_version]
+    source_ids: [payments]
+    query_ref: payments.count_finalised
+    aggregation_policy: sum
+    owner: payments
+  - metric_id: successful_payments
+    name: Successful payments
+    definition: Finalised payment attempts with outcome success.
+    unit: count
+    population: finalised_payment_attempts_with_success_by_finalisation_time
+    time_semantics: event_time
+    dimensions: [country, platform, payment_provider, checkout_release_version]
+    source_ids: [payments]
+    query_ref: payments.count_success
+    aggregation_policy: sum
+    owner: payments
+  - metric_id: payment_timeouts
+    name: Payment timeouts
+    definition: Finalised payment attempts with outcome timeout.
+    unit: count
+    population: finalised_payment_attempts_with_timeout_by_finalisation_time
+    time_semantics: event_time
+    dimensions: [country, platform, payment_provider, checkout_release_version]
+    source_ids: [payments]
+    query_ref: payments.count_timeout
+    aggregation_policy: sum
+    owner: payments
+  - metric_id: other_failed_payments
+    name: Other failed payments
+    definition: Finalised payment attempts with outcome other_failure.
+    unit: count
+    population: finalised_payment_attempts_with_other_failure_by_finalisation_time
+    time_semantics: event_time
+    dimensions: [country, platform, payment_provider, checkout_release_version]
+    source_ids: [payments]
+    query_ref: payments.count_other_failure
+    aggregation_policy: sum
+    owner: payments
+  - metric_id: payment_success_rate
+    name: Payment success rate
+    definition: Successful payments divided by finalised attempts. Describes attempts, not customers.
+    unit: ratio
+    population: finalised_payment_attempts_by_finalisation_time
+    time_semantics: event_time
+    dimensions: [country, platform, payment_provider, checkout_release_version]
+    source_ids: [payments]
+    calculation:
+      operator: divide
+      left: {metric_id: successful_payments, version: 1}
+      right: {metric_id: payment_attempts, version: 1}
+    aggregation_policy: ratio_of_sums
+    null_policy: null_on_zero_denominator
+    owner: payments
+
+  # ---------------------------------------------------------------- inventory
+  - metric_id: available_units
+    name: Available units
+    definition: Sum of sellable stock at the requested snapshot time. Summing snapshots over time is invalid.
+    unit: units
+    population: sellable_stock_units_at_snapshot
+    time_semantics: snapshot
+    dimensions: [sku_id, category, seller_id]
+    supported_granularities: [snapshot]
+    source_ids: [inventory_snapshots]
+    query_ref: inventory_snapshots.sum_sellable_units
+    aggregation_policy: snapshot_latest
+    owner: supply
+  - metric_id: units_sold
+    name: Units sold
+    definition: Sum of order-line quantities on confirmed orders.
+    unit: units
+    population: confirmed_order_line_units_by_confirmation_time
+    time_semantics: event_time
+    dimensions: [sku_id, category, seller_id]
+    source_ids: [order_lines]
+    query_ref: order_lines.sum_quantity
+    aggregation_policy: sum
+    owner: supply
+  - metric_id: stockout_sku_share
+    name: Stockout SKU share
+    definition: Active SKUs with zero sellable stock divided by active SKUs, at snapshot. Counts distinct SKUs, not units.
+    unit: ratio
+    population: active_skus_at_snapshot
+    time_semantics: snapshot
+    dimensions: [sku_id, category, seller_id]
+    supported_granularities: [snapshot]
+    source_ids: [inventory_snapshots]
+    query_ref: inventory_snapshots.zero_stock_sku_share
+    aggregation_policy: recompute_from_snapshot
+    null_policy: null_on_zero_denominator
+    owner: supply
+
+  # ---------------------------------------------------------------- economics
+  - metric_id: gross_merchandise_value
+    name: Gross merchandise value
+    definition: Merchandise list-price value on confirmed orders, before platform-funded discounts.
+    unit: EUR cents
+    population: confirmed_order_lines_by_confirmation_time
+    time_semantics: event_time
+    dimensions: [country, platform, category, acquisition_channel]
+    source_ids: [order_economics]
+    query_ref: order_economics.sum_list_value
+    aggregation_policy: sum
+    owner: finance
+  - metric_id: platform_fee_revenue
+    name: Platform fee revenue
+    definition: Per-line marketplace commission on pre-discount merchandise value.
+    unit: EUR cents
+    population: confirmed_order_lines_by_confirmation_time
+    time_semantics: event_time
+    dimensions: [country, platform, category, acquisition_channel]
+    source_ids: [order_economics]
+    query_ref: order_economics.sum_commission
+    aggregation_policy: sum
+    owner: finance
+  - metric_id: platform_funded_discounts
+    name: Platform-funded discounts
+    definition: Marketplace-funded discount cost on confirmed order lines.
+    unit: EUR cents
+    population: confirmed_order_lines_by_confirmation_time
+    time_semantics: event_time
+    dimensions: [country, platform, category, acquisition_channel]
+    source_ids: [order_economics]
+    query_ref: order_economics.sum_platform_discount
+    aggregation_policy: sum
+    owner: finance
+  - metric_id: variable_operating_cost
+    name: Variable operating cost
+    definition: Processing and servicing costs attributed to confirmed order lines.
+    unit: EUR cents
+    population: confirmed_order_lines_by_confirmation_time
+    time_semantics: event_time
+    dimensions: [country, platform, category, acquisition_channel]
+    source_ids: [order_economics]
+    query_ref: order_economics.sum_variable_cost
+    aggregation_policy: sum
+    owner: finance
+
+  # ---------------------------------------------------------------- advertising
+  - metric_id: advertising_spend
+    name: Advertising spend
+    definition: Cost incurred on acquisition ad clicks, bucketed by click time.
+    unit: EUR cents
+    population: ad_clicks_by_click_time
+    time_semantics: event_time
+    dimensions: [campaign_id, target_country, advertising_channel]
+    source_ids: [ad_events]
+    query_ref: ad_events.sum_click_cost
+    aggregation_policy: sum
+    owner: marketing
+  - metric_id: ad_impressions
+    name: Ad impressions
+    definition: Acquisition campaign impressions.
+    unit: count
+    population: ad_impressions_by_impression_time
+    time_semantics: event_time
+    dimensions: [campaign_id, target_country, advertising_channel]
+    source_ids: [ad_events]
+    query_ref: ad_events.count_impressions
+    aggregation_policy: sum
+    owner: marketing
+  - metric_id: ad_clicks
+    name: Ad clicks
+    definition: Acquisition campaign clicks.
+    unit: count
+    population: ad_clicks_by_click_time
+    time_semantics: event_time
+    dimensions: [campaign_id, target_country, advertising_channel]
+    source_ids: [ad_events]
+    query_ref: ad_events.count_clicks
+    aggregation_policy: sum
+    owner: marketing
+  - metric_id: effective_cost_per_click
+    name: Effective cost per click
+    definition: Advertising spend divided by ad clicks.
+    unit: EUR cents per click
+    population: ad_clicks_by_click_time
+    time_semantics: event_time
+    dimensions: [campaign_id, target_country, advertising_channel]
+    source_ids: [ad_events]
+    calculation:
+      operator: divide
+      left: {metric_id: advertising_spend, version: 1}
+      right: {metric_id: ad_clicks, version: 1}
+    aggregation_policy: ratio_of_sums
+    null_policy: null_on_zero_denominator
+    owner: marketing
+  - metric_id: daily_budget_utilization
+    name: Daily budget utilization
+    definition: Campaign spend since Berlin midnight divided by configured campaign daily budget. Not additive across time; multi-day requests are rejected.
+    unit: ratio
+    population: campaign_spend_business_day_to_date
+    time_semantics: business_day_to_date
+    dimensions: [campaign_id, target_country, advertising_channel]
+    supported_granularities: [5m, 15m, 1h]
+    source_ids: [campaign_pacing]
+    query_ref: campaign_pacing.spend_over_budget
+    aggregation_policy: recompute_from_spend_and_budget
+    owner: marketing
+
+  # ---------------------------------------------------------------- data health
+  - metric_id: event_ingestion_lag_seconds
+    name: Event ingestion lag p95
+    definition: p95 of ingestion time minus event time for received records, bucketed by event time. Describes only received records.
+    unit: seconds
+    population: received_records_by_event_time
+    time_semantics: event_time
+    dimensions: [source_id, event_type]
+    source_ids: [ingestion_receipts]
+    query_ref: ingestion_receipts.p95_lag
+    aggregation_policy: recompute_percentile
+    owner: data_platform
+  - metric_id: data_completeness_ratio
+    name: Data completeness ratio
+    definition: Received unique records divided by the source-manifest count for a closed event-time interval. Missing manifests give unknown completeness.
+    unit: ratio
+    population: manifest_intervals_by_interval_start
+    time_semantics: event_time
+    dimensions: [source_id, event_type]
+    source_ids: [source_manifests, ingestion_receipts]
+    query_ref: source_manifests.received_over_declared
+    aggregation_policy: ratio_of_sums
+    null_policy: unknown_on_missing_manifest
+    maturity_delay_seconds: 120
+    owner: data_platform

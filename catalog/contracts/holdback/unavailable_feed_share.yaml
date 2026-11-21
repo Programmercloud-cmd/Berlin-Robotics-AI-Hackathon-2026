@@ -1,0 +1,19 @@
+metric_id: unavailable_feed_share
+version: 1
+name: Unavailable feed share
+definition: Share of personalised feed impressions showing products with zero sellable stock.
+unit: ratio
+population: feed_impressions_by_impression_time
+time_semantics: event_time
+dimensions: [country, platform, category, recommendation_model_version]
+supported_granularities: [5m, 15m, 1h, day]
+source_ids: [feed_events]
+calculation:
+  operator: divide
+  left: {metric_id: unavailable_feed_impressions, version: 1}
+  right: {metric_id: feed_impressions, version: 1}
+maturity_delay_seconds: 0
+null_policy: null_on_zero_denominator
+aggregation_policy: ratio_of_sums
+effective_from: "2026-11-07T00:00:00Z"
+owner: recommendations
