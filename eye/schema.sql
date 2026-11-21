@@ -1,0 +1,108 @@
+create schema if not exists eye;
+set search_path to eye;
+
+create table if not exists windows (
+    start_at timestamptz primary key,
+    end_at timestamptz not null,
+    expected_events integer not null
+);
+
+create table if not exists events (
+    id text primary key,
+    activity text not null,
+    occurred_at timestamptz not null,
+    ingested_at timestamptz not null,
+    window_start timestamptz not null references windows(start_at),
+    attrs jsonb not null default '{}'
+);
+create index if not exists events_window_activity on events(window_start, activity);
+
+create table if not exists objects (
+    id text primary key,
+    type text not null,
+    attrs jsonb not null default '{}'
+);
+
+create table if not exists event_objects (
+    event_id text not null references events(id),
+    object_id text not null references objects(id),
+    qualifier text not null,
+    primary key (event_id, object_id, qualifier)
+);
+
+create table if not exists metrics (
+    id text primary key,
+    name text not null,
+    definition text not null,
+    calculation jsonb not null,
+    dimensions text[] not null default '{}',
+    access jsonb not null default '{}',
+    direction text not null default 'both',
+    registered_at timestamptz not null default now()
+);
+
+create table if not exists observations (
+    metric_id text not null references metrics(id),
+    window_start timestamptz not null references windows(start_at),
+    scope jsonb not null,
+    value double precision not null,
+    sample_size integer not null,
+    primary key (metric_id, window_start, scope)
+);
+
+create table if not exists graph_nodes (
+    id text primary key,
+    kind text not null,
+    label text not null,
+    properties jsonb not null default '{}'
+);
+
+create table if not exists graph_edges (
+    source text not null references graph_nodes(id),
+    target text not null references graph_nodes(id),
+    kind text not null,
+    provenance text not null,
+    confidence double precision,
+    properties jsonb not null default '{}',
+    primary key (source, target, kind, provenance)
+);
+create index if not exists graph_edges_target on graph_edges(target);
+
+create table if not exists anomalies (
+    id bigint generated always as identity primary key,
+    metric_id text not null references metrics(id),
+    window_start timestamptz not null references windows(start_at),
+    scope jsonb not null,
+    observed double precision not null,
+    expected double precision not null,
+    score double precision not null,
+    sample_size integer not null,
+    unique (metric_id, window_start, scope)
+);
+
+create table if not exists incidents (
+    id bigint generated always as identity primary key,
+    metric_id text not null references metrics(id),
+    scope jsonb not null,
+    opened_at timestamptz not null,
+    updated_at timestamptz not null,
+    recovered_at timestamptz,
+    healthy_windows integer not null default 0,
+    report jsonb not null default '{}'
+);
+create unique index if not exists incidents_open_scope on incidents(metric_id, scope)
+    where recovered_at is null;
+
+create table if not exists evidence (
+    id bigint generated always as identity primary key,
+    incident_id bigint not null references incidents(id),
+    window_start timestamptz not null references windows(start_at),
+    kind text not null,
+    node_id text references graph_nodes(id),
+    payload jsonb not null
+);
+
+create table if not exists runtime (
+    key text primary key,
+    value jsonb not null
+);
