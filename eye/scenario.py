@@ -15,21 +15,36 @@ class Scope(BaseModel):
     platform: Literal["mobile", "web"] | None = None
     provider: Literal["Stripe", "Adyen"] | None = None
 
+
 class Scenario(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    fault_stage: Literal["payment_timeout", "product_page_load"]
-    scope: Scope
+    effect: Literal["reduce_completions", "payment_timeout"]
+    transition: Literal["product_view", "cart_add", "payment"]
+    scope: Scope = Field(default_factory=Scope)
     severity: float = Field(ge=0.1, le=0.95)
     duration_hours: int = Field(ge=1, le=24)
     premise: str | None = Field(default=None, min_length=1, max_length=1500)
 
+    @model_validator(mode="before")
+    @classmethod
+    def upgrade_saved_plan(cls, value):
+        if isinstance(value, dict) and "fault_stage" in value and "effect" not in value and "transition" not in value:
+            legacy = {"payment_timeout": ("payment_timeout", "payment"),
+                      "product_page_load": ("reduce_completions", "product_view")}
+            stage = value["fault_stage"]
+            if isinstance(stage, str) and stage in legacy:
+                value = value.copy()
+                value.pop("fault_stage")
+                value["effect"], value["transition"] = legacy[stage]
+        return value
+
     @model_validator(mode="after")
-    def validate_scope(self):
-        if self.fault_stage == "payment_timeout" and not self.scope.model_dump(exclude_none=True):
-            raise ValueError("Choose at least one country, platform or provider for payment timeouts.")
-        if self.fault_stage == "product_page_load" and self.scope.provider:
-            raise ValueError("A payment provider cannot scope a product-page load.")
+    def validate_transition(self):
+        if (self.effect == "payment_timeout") != (self.transition == "payment"):
+            raise ValueError("Payment uses payment_timeout; product views and cart additions use reduce_completions.")
+        if self.transition != "payment" and self.scope.provider:
+            raise ValueError("A payment provider can only scope payment traffic.")
         return self
 
 
@@ -42,13 +57,17 @@ class ScenarioReply(BaseModel):
 
 SCENARIO_PROMPT = """Plan experiments for a synthetic marketplace simulator.
 Use the latest request and prior chat. Keep the hypothetical premise in the plan.
-Translate premises into either payment_timeout (absolute timeout probability)
-or product_page_load (fraction of otherwise successful product views prevented).
-A cause need not have a graph node. For 'product pages hosted in Frankfurt fail
-to load', propose product_page_load, scope {} and explain that a hosting location
-does not describe customer traffic. There is no simulated hosting geography.
-Only use explicit traffic restrictions: country DE or FR, platform mobile or web,
-and, for payment only, provider Stripe or Adyen. Payment requires a restriction.
+Use effect reduce_completions for fewer successful outcomes at a transition,
+either product_view (a page request reaches a successful product view) or
+cart_add (an add-to-cart request reaches a successful cart addition). Severity
+is the fraction of otherwise successful completions prevented at that transition.
+Use effect payment_timeout with transition payment and an absolute timeout probability.
+A cause need not have a graph node. 'Frankfurt product pages fail to load' maps to
+product_view and 'people struggle to add products to their cart' maps to cart_add.
+Both use scope {} unless a customer traffic restriction is explicit. The simulator
+has no hosting geography, so Frankfurt as a hosting premise cannot scope traffic.
+Use marketplace-wide scope {} for any unspecified traffic. Explicit restrictions
+are country DE or FR, platform mobile or web, and for payment only provider Stripe or Adyen.
 Use severity 0.65 and duration 1 virtual hour if unspecified. Duration is whole
 hours from 1 to 24. For requests with no supported observable effect, return null
 scenario and a short explanation. Return a proposal for review, and describe

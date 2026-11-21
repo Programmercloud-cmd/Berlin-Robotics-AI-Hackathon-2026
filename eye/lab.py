@@ -49,8 +49,9 @@ def stop_process(process):
 
 
 class Lab:
-    def __init__(self, devin):
+    def __init__(self, devin, eye_port=8000):
         self.devin = devin
+        self.eye_port = eye_port
         self.lock = Lock()
         self.stop = Event()
         self.phase = "postgres"
@@ -66,8 +67,8 @@ class Lab:
         try:
             from pgserver import get_server
 
-            if port_open(8000):
-                raise RuntimeError("Port 8000 is in use. Stop the existing Eye dashboard first.")
+            if port_open(self.eye_port):
+                raise RuntimeError(f"Port {self.eye_port} is in use. Stop the existing Eye dashboard first.")
             print("EYE_STARTUP postgres", flush=True)
             with TemporaryDirectory(prefix="eye-lab-") as directory:
                 postgres = get_server(Path(directory) / "data")
@@ -113,7 +114,9 @@ class Lab:
                 raise RuntimeError("The simulator stopped while generating the baseline.")
             with self.lock:
                 self.phase = "discovery"
-                self.eye = subprocess.Popen([sys.executable, "-m", "eye", "serve"], env=judge_env)
+                self.eye = subprocess.Popen(
+                    [sys.executable, "-m", "eye", "serve", "--port", str(self.eye_port)], env=judge_env,
+                )
             print("EYE_STARTUP discovery", flush=True)
             deadline = time.monotonic() + 180
             while not self.stop.is_set():
@@ -121,7 +124,7 @@ class Lab:
                     raise RuntimeError("Eye did not finish discovering the baseline.")
                 with connect(dsn) as db:
                     initialized = state(db, "baseline_through")
-                if initialized and port_open(8000):
+                if initialized and port_open(self.eye_port):
                     break
                 self.stop.wait(0.3)
             if self.stop.is_set():
@@ -243,7 +246,7 @@ class Lab:
                     if run["scenario"] and run.get("start_at"):
                         run["evaluation"] = evaluate(db, run, checked)
             upcoming = last + HOUR
-            result.update(eye_url=EYE_URL, next_window=upcoming,
+            result.update(eye_url=f"http://127.0.0.1:{self.eye_port}/", next_window=upcoming,
                           pattern_day=traffic_cycle(upcoming)[1] + 1, eye_through=checked)
         return result
 
@@ -256,8 +259,8 @@ class NormalRequest(BaseModel):
     hours: int = Field(ge=1, le=48)
 
 
-def make_lab_app():
-    lab = Lab(configured_devin())
+def make_lab_app(eye_port=8000):
+    lab = Lab(configured_devin(), eye_port)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -280,6 +283,10 @@ def make_lab_app():
     @app.get("/theme.css", include_in_schema=False)
     def theme():
         return FileResponse(Path(__file__).with_name("static") / "theme.css")
+
+    @app.get("/theme.js", include_in_schema=False)
+    def theme_script():
+        return FileResponse(Path(__file__).with_name("static") / "theme.js", media_type="text/javascript")
 
     @app.get("/api/lab")
     def snapshot():

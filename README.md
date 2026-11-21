@@ -41,15 +41,15 @@ The original `product_views` and `cart_additions` map to distinct session-cohort
 
 Start `python -m eye operator` and choose **Start test lab** on the [operator panel](http://127.0.0.1:8001). Open its [test lab link on port 8002](http://127.0.0.1:8002). The lab starts a fresh local PostgreSQL instance, a separate simulator process, and the [Eye dashboard on port 8000](http://127.0.0.1:8000). To open the lab directly with port 8000 free, run `python -m eye lab`. Stop the launcher or lab with Ctrl+C to close the local run.
 
-1. Set `DEVIN_API_KEY` and `DEVIN_ORG_ID` in the repo-root `.env` for chat. Try “simulate payment timeouts in Germany for three hours” or “product pages hosted in Frankfurt fail to load.”
-2. Review the proposed simulator effect, affected traffic, severity, and duration. The Frankfurt premise can be modeled as fewer successful product views. Hosting geography stays in the lab. Click **Apply to upcoming windows** when the preview is ready.
+1. Set `DEVIN_API_KEY` and `DEVIN_ORG_ID` in the repo-root `.env` for chat. Try “Frankfurt product pages fail to load” or “people struggle to add products to their cart.” Devin can map both premises to the same **Fewer successful completions** effect at different workflow transitions. Payment timeout scenarios are also supported.
+2. Review the transition, affected traffic, severity, and duration. Unspecified scope is marketplace-wide. For completion loss, severity is the fraction of otherwise successful attempts that the simulator prevents from completing. Click **Apply to upcoming windows** when the preview is ready.
 3. Read **Run timeline** for the applied plan, scenario start and end, Eye’s first alert and scope, and recorded recovery. Follow the incident link for the evidence and diagnosis. The alert’s virtual timestamp is the end of its observation window. Real latency measures from the start of publishing the scenario to the persisted alert. Each scenario publishes four healthy hours afterward.
 
 Use **Generate traffic** to publish normal hours while Devin is preparing a plan. Normal traffic follows a repeating 28-day volume pattern with seeded variation. Every generated window advances the virtual clock and uses fresh event IDs. Select **Review replay** to preview a previous plan, or use **Download JSON** and **Review saved scenario** to preview it in a later lab session. Applying the preview uses the next virtual windows.
 
-The workflow diagram, scenario premises, and controls stay in the test lab. Eye reads observed events and closed windows from PostgreSQL. Set `EYE_MODEL=devin` when launching the operator or lab if Eye should also use Devin for incident reports. The lab chat uses Devin with valid credentials regardless of Eye’s chosen report provider.
+The workflow diagram, scenario premises, and controls stay in the test lab. Eye reads observed requests, outcomes, and closed windows from PostgreSQL and compares successive funnel steps with their baselines. Set `EYE_MODEL=devin` when launching the operator or lab if Eye should also use Devin for incident reports. The lab chat uses Devin with valid credentials regardless of Eye’s chosen report provider.
 
-On Eye’s dashboard, **Graph** shows the observed workflow and **Table** opens the metric catalog. Use the eye button to switch graph views, **Fullscreen** to expand the graph, and the edge controls to reopen collapsed panels. All three views use the light and dark theme tokens from `AI_Chronicle_UI`.
+On Eye’s dashboard, **Graph** shows the observed workflow and **Table** opens the metric catalog. Use the eye button to switch graph views, **Fullscreen** to expand the graph, and the edge controls to reopen collapsed panels. All three views use the Bright and Dark palettes from `AI_Chronicle_UI`. Use the header toggle to change themes. Your choice follows you between local views on the same host.
 
 ## Live reasoning
 

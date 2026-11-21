@@ -19,6 +19,10 @@ PRIORITY = {
     "measures": 0, "calculated_from": 1, "precedes": 2, "depends_on": 3,
     "part_of": 4, "associated_with": 5, "may_influence": 6, "sourced_from": 7,
 }
+TRANSITION_EVENTS = {
+    "product_view_sessions": ("product_page_requested", "product_page_load_failed", "successful product views"),
+    "add_to_cart_sessions": ("cart_add_requested", "cart_add_failed", "successful cart additions"),
+}
 REPORT_PROMPT = """Investigate this marketplace anomaly using only the provided observations.
 Distinguish the observed failure mechanism from an unverified underlying cause.
 Use scoped observation evidence and reference the graph or metric evidence by node ID.
@@ -97,7 +101,8 @@ def first_funnel_break(db, tool, start, scope, baseline, incident):
             observed = current["observed"] / previous["observed"]
             expected = current["expected"] / previous["expected"]
             if expected - observed >= 0.10:
-                text = (f"{current['name']} was the first measured funnel drop in this scope. "
+                label = TRANSITION_EVENTS.get(identifier, (None, None, current["name"].lower()))[2]
+                text = (f"The first measured funnel drop in this scope was at {label}. "
                         f"{current['observed']:.0f} of {previous['observed']:.0f} reached that step "
                         f"({observed:.1%} versus {expected:.1%} expected). "
                         f"Evidence: {metric_node(previous['metric_id'])}, {metric_node(identifier)}.")
@@ -107,6 +112,28 @@ def first_funnel_break(db, tool, start, scope, baseline, incident):
                 return text, identifier, current["scope"]
         previous = current
     return None, None, None
+
+
+def transition_evidence(db, tool, incident, start, stage, scope, samples):
+    if stage not in TRANSITION_EVENTS:
+        return None
+    request, failure, _ = TRANSITION_EVENTS[stage]
+    failures = tool("supporting_events", window_start=start, scope=scope, activities=[failure], limit=3)
+    if not failures:
+        return None
+    example = failures[0]
+    session = example["attrs"].get("session_id")
+    requests = tool("supporting_events", window_start=start, scope={**scope, "session_id": session},
+                    activities=[request], limit=1) if session else []
+    for event_type, rows in ((request, requests), (failure, failures)):
+        if rows:
+            node = f"activity:{event_type}"
+            samples.append({"node": node, "events": rows})
+            add_evidence(db, incident, start, "observed events", rows, node)
+    response = example["attrs"].get("http_status")
+    outcome = f" returned HTTP {response}" if response is not None else " recorded a failed outcome"
+    prefix = f"Request {requests[0]['id']} ({request}) did not complete. " if requests else ""
+    return f"{prefix}Event {example['id']} ({failure}){outcome}."
 
 
 def collect_evidence(db, tool, anomaly, incident, baseline):
@@ -157,15 +184,9 @@ def collect_evidence(db, tool, anomaly, incident, baseline):
                 queue.append((neighbor, depth + 1, link))
 
     first_break, stage, break_scope = first_funnel_break(db, tool, start, scope, baseline, incident)
-    page_errors = []
-    if stage == "product_view_sessions":
-        activity = "activity:product_page_load_failed"
-        if tool("graph_neighbors", node_id=activity).get("node"):
-            page_errors = tool("supporting_events", window_start=start, scope=break_scope,
-                               activities=["product_page_load_failed"], limit=3)
-            if page_errors:
-                samples.append({"node": activity, "events": page_errors})
-                add_evidence(db, incident, start, "observed events", page_errors, activity)
+    transition_failure = transition_evidence(db, tool, incident, start, stage, break_scope, samples)
+    if transition_failure:
+        first_break += " " + transition_failure
 
     definition = tool("metric_definition", metric_id=anomaly["metric_id"])
     label = definition["name"]
@@ -193,13 +214,8 @@ def collect_evidence(db, tool, anomaly, incident, baseline):
         f"of {row['expected']:.1f} ({metric_node(row['metric_id'])})."
         for row in candidates[:2]
     ] or ["The graph shows related activities, but this window does not isolate the failure mechanism."]
-    if page_errors:
-        example = page_errors[0]
-        status = example["attrs"].get("http_status")
-        likely = [
-            f"Product-page requests failed before a successful view. "
-            f"Observed event {example['id']} recorded HTTP {status} ({activity})."
-        ]
+    if transition_failure:
+        likely = [transition_failure]
     report = {
         "summary": summary, "likely_causes": likely, "impact": impact,
         "uncertainty": "The observations establish the deviation and its scope. The underlying operational cause remains unverified.",
@@ -207,7 +223,9 @@ def collect_evidence(db, tool, anomaly, incident, baseline):
     }
     if first_break:
         report["first_observable_break"] = first_break
-        report["uncertainty"] = "The evidence shows where the funnel broke. The underlying cause and hosting location remain unverified."
+        report["uncertainty"] = ("The evidence shows where the funnel broke. The underlying service cause remains unverified.")
+        if stage == "product_view_sessions":
+            report["uncertainty"] += " The observed events do not identify a hosting location."
     context = {
         "anomaly": anomaly, "metric": label, "affected_scope": scope,
         "baseline_impact": impact, "metric_evidence": signals, "event_evidence": samples,

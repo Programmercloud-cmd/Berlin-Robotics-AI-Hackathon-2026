@@ -50,7 +50,9 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
     rng = Random(f"{seed}:{clock}")
     search_rng = Random(f"{seed}:{clock}:search")
     catalog_rng = Random(f"{seed}:{clock}:catalog")
-    page_rng = Random(f"{seed}:{clock}:product-page")
+    transition_events_rng = Random(f"{seed}:{clock}:transition-events")
+    page_events_rng = transition_events_rng if patterned else Random(f"{seed}:{clock}:product-page")
+    completion_rng = Random(f"{seed}:{clock}:completion-loss")
     prefix = f"{clock}:"
     previous = db.execute(
         """select attrs from events where activity = 'inventory_snapshot' and window_start =
@@ -85,19 +87,29 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
         cycle, _ = traffic_cycle(start)
         seasonal *= cycle * Random(f"{seed}:{clock}:traffic").uniform(0.98, 1.02)
     fault_scope = scenario.scope.model_dump(exclude_none=True) if scenario else {}
+
+    def in_scope(attrs):
+        return all(attrs.get(key) == value for key, value in fault_scope.items())
+
+    def completion_blocked(transition, attrs):
+        return (scenario and scenario.effect == "reduce_completions" and scenario.transition == transition
+                and in_scope(attrs) and completion_rng.random() < scenario.severity)
+
     volume = round(600 * seasonal * traffic)
     for index in range(volume):
+        # Lab journeys have independent draws. The fixed rehearsal keeps its established seed sequence.
+        shopper_rng = Random(f"{seed}:{clock}:session:{index}") if patterned else rng
         base = f"{prefix}{index}:"
         session, cart, order, payment = (f"{base}{kind}" for kind in ("session", "cart", "order", "payment"))
-        country, platform, provider = rng.choices(SEGMENTS, weights=(4, 1, 1, 1, 1, 1, 1, 1))[0]
+        country, platform, provider = shopper_rng.choices(SEGMENTS, weights=(4, 1, 1, 1, 1, 1, 1, 1))[0]
         channel = catalog_rng.choice(("direct", "organic", "paid_search", "display"))
         journey = {"country": country, "platform": platform, "acquisition_channel": channel,
                    "session_id": session}
         checkout = {**journey, "provider": provider, "payment_provider": provider,
                     "checkout_release_version": "checkout-v2" if platform == "mobile" else "checkout-v1",
                     "order_id": order, "payment_id": payment}
-        elapsed = timedelta(seconds=rng.randrange(0, 50 * 60))
-        sku = rng.choice(tuple(PRODUCTS))
+        elapsed = timedelta(seconds=shopper_rng.randrange(0, 50 * 60))
+        sku = shopper_rng.choice(tuple(PRODUCTS))
         item = {**journey, "sku": sku, **ALL_PRODUCTS[sku]}
         session_link = [(session, "customer session")]
         product_link = [*session_link, (sku, "product")]
@@ -120,25 +132,28 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
             if results and search_rng.random() < 0.72:
                 add_event("search_result_clicked", elapsed + timedelta(seconds=3),
                           {**item, **search_attrs}, [*search_links, (sku, "selected result")], search_rng)
-        add_event("product_page_requested", elapsed + timedelta(seconds=2), item, product_link, page_rng)
-        page_affected = (scenario and scenario.fault_stage == "product_page_load"
-                         and all(journey.get(key) == value for key, value in fault_scope.items()))
-        if rng.random() >= 0.97 or (page_affected and page_rng.random() < scenario.severity):
+        add_event("product_page_requested", elapsed + timedelta(seconds=2), item, product_link, page_events_rng)
+        if shopper_rng.random() >= 0.97 or completion_blocked("product_view", journey):
             add_event("product_page_load_failed", elapsed + timedelta(seconds=5),
-                      {**item, "http_status": 503}, product_link, page_rng)
+                      {**item, "http_status": 503}, product_link, page_events_rng)
             continue
         add_event("product_viewed", elapsed + timedelta(seconds=5), item, product_link)
-        if rng.random() < 0.22:
-            viewed = rng.choice(tuple(PRODUCTS))
+        if shopper_rng.random() < 0.22:
+            viewed = shopper_rng.choice(tuple(PRODUCTS))
             add_event("product_viewed", elapsed + timedelta(seconds=13),
                       {**journey, "sku": viewed, **ALL_PRODUCTS[viewed]},
                       [*session_link, (viewed, "product")])
-        if rng.random() >= 0.83:
+        if shopper_rng.random() >= 0.83:
+            continue
+        add_event("cart_add_requested", elapsed + timedelta(seconds=20), item, product_link, transition_events_rng)
+        if completion_blocked("cart_add", journey):
+            add_event("cart_add_failed", elapsed + timedelta(seconds=22),
+                      {**item, "http_status": 503}, product_link, transition_events_rng)
             continue
         add_object(cart, "cart", {})
         cart_links = [*product_link, (cart, "cart")]
         add_event("cart_added", elapsed + timedelta(seconds=22), item, cart_links)
-        if rng.random() >= 0.80 or not stock[sku]:
+        if shopper_rng.random() >= 0.80 or not stock[sku]:
             continue
         add_object(order, "order", {"sku": sku, "amount_cents": item["price_cents"]})
         add_object(payment, "payment", {"provider": provider})
@@ -149,10 +164,9 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
         add_event("payment_attempted", elapsed + timedelta(seconds=45), commerce, payment_links)
         payment_affected = fault and all(checkout[key] == value for key, value in PAYMENT_SCOPE.items())
         timeout_rate = 0.63 if payment_affected else 0.022
-        if (scenario and scenario.fault_stage == "payment_timeout" and
-                all(checkout[key] == value for key, value in fault_scope.items())):
+        if scenario and scenario.effect == "payment_timeout" and in_scope(checkout):
             timeout_rate = scenario.severity
-        outcome = rng.random()
+        outcome = shopper_rng.random()
         if outcome < timeout_rate:
             add_event("payment_timed_out", elapsed + timedelta(seconds=62),
                       {**commerce, "response": "gateway_timeout"}, payment_links)
@@ -163,8 +177,9 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
             add_event("payment_succeeded", elapsed + timedelta(seconds=47),
                       {**commerce, "response": "authorized"}, payment_links)
             value = item["price_cents"]
+            discount_rng = shopper_rng if patterned else catalog_rng
             line = {**commerce, "order_line_id": f"{order}:line-1", "quantity": 1, "list_value_cents": value,
-                    "fee_cents": value * 12 // 100, "discount_cents": 150 if catalog_rng.random() < 0.2 else 0,
+                    "fee_cents": value * 12 // 100, "discount_cents": 150 if discount_rng.random() < 0.2 else 0,
                     "operating_cost_cents": 40 + value // 100}
             confirmation = elapsed + timedelta(seconds=50)
             add_event("order_confirmed", confirmation, line, payment_links)

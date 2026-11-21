@@ -20,19 +20,17 @@
   color: var(--text);
   background: var(--background);
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
-    --background: #121110;
-    --surface: #191816;
-    --text: #eeeae4;
-    --muted: #aaa39a;
-    --line: #403c37;
-    --accent: #ef8a4c;
-    --focus: #75bfff;
-    --green: #8bc4a2;
-    --danger: #ffaca1;
-  }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #121110;
+  --surface: #191816;
+  --text: #eeeae4;
+  --muted: #aaa39a;
+  --line: #403c37;
+  --accent: #ef8a4c;
+  --focus: #75bfff;
+  --green: #8bc4a2;
+  --danger: #ffaca1;
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; }
@@ -49,6 +47,9 @@ a { color: var(--accent); text-underline-offset: .2em; }
 .brand-mark::after, .eye-icon::after { content: ""; position: absolute; width: .28rem; height: .28rem; background: currentColor; border-radius: 50%; }
 .app-bar { border-bottom: 1px solid var(--line); background: var(--surface); }
 .app-bar-row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; min-height: 4rem; }
+.app-bar-tools { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem 1rem; }
+.theme-toggle { padding: .35rem .6rem; border: 1px solid var(--line); border-radius: .35rem; background: var(--surface); color: var(--text); font-size: .82rem; white-space: nowrap; }
+.theme-toggle:hover { background: var(--accent-wash); color: var(--accent); }
 .status-dot { display: inline-block; flex: 0 0 .48rem; width: .48rem; height: .48rem; border-radius: 50%; background: var(--accent); }
 .status-dot.connected { background: var(--green); }
 @media (prefers-reduced-motion: reduce) {

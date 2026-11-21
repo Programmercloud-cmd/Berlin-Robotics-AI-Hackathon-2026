@@ -549,7 +549,8 @@ fullscreenButton.addEventListener("click", async () => {
 });
 document.addEventListener("fullscreenchange", syncFullscreen);
 new ResizeObserver(() => cy.resize()).observe(byId("graph"));
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => cy.style(graphStyles()));
+new MutationObserver(() => cy.style(graphStyles()))
+  .observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
 const modeToggle = byId("mode-toggle");
 function showModes(open) {

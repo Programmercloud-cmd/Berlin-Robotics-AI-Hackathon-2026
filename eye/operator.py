@@ -103,6 +103,10 @@ def make_operator_app():
     def theme():
         return FileResponse(Path(__file__).with_name("static") / "theme.css")
 
+    @app.get("/theme.js", include_in_schema=False)
+    def theme_script():
+        return FileResponse(Path(__file__).with_name("static") / "theme.js", media_type="text/javascript")
+
     @app.get("/api/rehearsal")
     def status():
         return rehearsal.status()

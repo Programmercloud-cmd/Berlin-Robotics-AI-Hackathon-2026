@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Eye of the System · Operator</title>
+  <script src="/theme.js"></script>
   <link rel="stylesheet" href="/theme.css">
   <style>
     .shell { width: min(100% - 2.5rem, 72rem); margin-inline: auto; }
@@ -21,8 +22,8 @@
     h2 { margin: 0; font-size: 1.12rem; letter-spacing: -.02em; }
     .launch-option p { margin: 0 0 .4rem; font-size: .92rem; }
     #error { color: var(--danger); margin: 1rem 1.15rem; }
-    button { justify-self: start; border: 1px solid var(--accent); border-radius: .35rem; padding: .56rem .75rem; color: var(--accent); background: var(--accent-wash); font-weight: 650; }
-    button:hover:not(:disabled) { background: var(--surface); }
+    .launch-option button { justify-self: start; border: 1px solid var(--accent); border-radius: .35rem; padding: .56rem .75rem; color: var(--accent); background: var(--accent-wash); font-weight: 650; }
+    .launch-option button:hover:not(:disabled) { background: var(--surface); }
     .view-links { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 1.15rem; font-weight: 620; }
     @media (max-width: 35rem) {
       .launches { grid-template-columns: 1fr; }
@@ -34,6 +35,7 @@
   <header class="app-bar">
     <div class="shell app-bar-row">
       <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Eye of the System</div>
+      <button class="theme-toggle" type="button" hidden>Use dark theme</button>
     </div>
   </header>
   <main class="shell">

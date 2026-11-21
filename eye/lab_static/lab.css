@@ -23,8 +23,8 @@ p { margin: .55rem 0; line-height: 1.55; color: var(--muted); }
 .speaker { display: block; color: var(--accent); font-size: .86rem; font-weight: 650; }
 form { display: grid; gap: .6rem; margin-top: 1rem; }
 label { font-weight: 600; font-size: .9rem; }
-button { width: fit-content; padding: .5rem .72rem; border: 1px solid var(--accent); border-radius: .35rem; background: var(--accent-wash); color: var(--accent); font-size: .89rem; font-weight: 650; }
-button:hover:not(:disabled) { background: var(--surface); }
+main button { width: fit-content; padding: .5rem .72rem; border: 1px solid var(--accent); border-radius: .35rem; background: var(--accent-wash); color: var(--accent); font-size: .89rem; font-weight: 650; }
+main button:hover:not(:disabled) { background: var(--surface); }
 button.secondary { background: var(--surface); border-color: var(--line); color: var(--text); }
 button.secondary:hover { background: var(--accent-wash); }
 textarea, input[type=number] { padding: .55rem; background: var(--field); border: 1px solid var(--line); border-radius: .35rem; }

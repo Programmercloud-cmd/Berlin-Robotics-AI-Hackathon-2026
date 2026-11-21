@@ -15,7 +15,12 @@ const segment = (scope) => Object.entries(scope || {}).filter(([, value]) => val
   .join(" · ") || "Marketplace-wide";
 const effects = {
   payment_timeout: ["More payment attempts time out", "timeout probability"],
-  product_page_load: ["Fewer sessions reach a successful product view", "of otherwise successful views prevented"],
+  reduce_completions: ["Fewer successful completions", "of otherwise successful completions prevented"],
+};
+const transitions = {
+  product_view: "Product page request → successful product view",
+  cart_add: "Add-to-cart request → successful cart addition",
+  payment: "Payment attempt → payment outcome",
 };
 const phases = {
   postgres: "Starting local PostgreSQL.",
@@ -105,12 +110,13 @@ function renderChat() {
 }
 
 function planFields(plan) {
-  const [effect, severity] = effects[plan.fault_stage];
+  const transition = plan.transition || (plan.fault_stage === "product_page_load" ? "product_view" : "payment");
+  const [effect, severity] = effects[plan.effect || (transition === "payment" ? "payment_timeout" : "reduce_completions")];
   return [
     ...(plan.premise ? [["Lab premise", plan.premise]] : []),
     ["Simulator effect", effect],
-    ["Affected traffic", plan.fault_stage === "product_page_load" && segment(plan.scope) === "Marketplace-wide"
-      ? "All product-page traffic" : segment(plan.scope)],
+    ["Transition", transitions[transition]],
+    ["Affected traffic", segment(plan.scope)],
     ["Severity", percent.format(plan.severity) + " " + severity],
     ["Duration", plan.duration_hours + (plan.duration_hours === 1 ? " virtual hour" : " virtual hours")]
   ];
@@ -190,9 +196,9 @@ function renderRuns() {
     if (run.scenario) {
       box.append(element("h4", "Applied plan"), fields(planFields(run.scenario)), renderTimeline(run));
       const result = run.evaluation || {};
-      if (result.incident_id) {
+      if (result.incident_id && state.eye_url) {
         const incident = element("a", "View Eye incident #" + result.incident_id);
-        incident.href = "http://127.0.0.1:8000/?incident=" + encodeURIComponent(result.incident_id);
+        incident.href = new URL("?incident=" + encodeURIComponent(result.incident_id), state.eye_url);
         box.append(incident);
       }
     } else if (run.start_at) {
@@ -210,6 +216,7 @@ async function refresh() {
     byId("status").textContent = state.error || phases[state.phase];
     byId("status-dot").classList.toggle("connected", state.phase === "ready");
     byId("eye-link").hidden = !state.eye_url;
+    if (state.eye_url) byId("eye-link").href = state.eye_url;
     byId("clock").textContent = state.next_window
       ? "Next window " + time(state.next_window) + " · Day " + state.pattern_day + " of 28 · Seed " + state.seed
       : "Waiting for the baseline.";
