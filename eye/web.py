@@ -1,14 +1,18 @@
 from contextlib import asynccontextmanager
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Thread
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from eye import runtime
+from eye import investigation, runtime
 from eye.db import connect, state
+from eye.metric_catalog import CATALOG, LEGACY
+from eye.metric_readings import BERLIN, Facts, MAX_MATURITY, metric_readings
 from eye.observation import make_mcp
 
 STATIC = Path(__file__).with_name("static")
@@ -33,6 +37,7 @@ def make_app(dsn, model=None, demo=None):
         stop = Event()
         worker = Thread(target=runtime.watch, args=(dsn, stop, model), daemon=True)
         worker.start()
+        Thread(target=investigation.watch_reports, args=(dsn, stop, model), daemon=True).start()
         if demo:
             Thread(target=demo, args=(stop,), daemon=True).start()
         try:
@@ -48,7 +53,7 @@ def make_app(dsn, model=None, demo=None):
         return FileResponse(STATIC / "index.html")
 
     @app.get("/api/state")
-    def snapshot():
+    def snapshot(incident: int | None = Query(default=None, gt=0, le=9223372036854775807)):
         with connect(dsn) as db:
             edges = db.execute(
                 "select * from graph_edges order by source, target, kind"
@@ -64,9 +69,26 @@ def make_app(dsn, model=None, demo=None):
                     "select * from anomalies order by window_start desc, score desc limit 250"
                 ).fetchall(),
                 "incidents": db.execute(
-                    "select * from incidents order by recovered_at nulls first, opened_at desc limit 50"
+                    """select i.*, exists (
+                           select 1 from pending_reports p where p.incident_id = i.id
+                       ) as investigation_pending
+                       from incidents i order by (i.id = %s) desc nulls last,
+                           recovered_at nulls first, opened_at desc limit 50""",
+                    (incident,),
                 ).fetchall(),
             }
+
+    @app.get("/api/events")
+    def observed_events():
+        with connect(dsn) as db:
+            window = state(db, "last_window")
+            if not window:
+                return []
+            return db.execute(
+                """select id, activity, occurred_at, ingested_at, attrs from events
+                   where window_start <= %s order by occurred_at desc, id desc limit 40""",
+                (window,),
+            ).fetchall()
 
     @app.get("/api/incidents/{incident_id}/evidence")
     def evidence(incident_id: int):
@@ -76,6 +98,73 @@ def make_app(dsn, model=None, demo=None):
                    order by window_start desc, id desc limit 120""",
                 (incident_id,),
             ).fetchall()
+
+    @app.get("/api/catalog")
+    def catalog():
+        with connect(dsn) as db:
+            rows = db.execute(
+                """select m.id, m.direction, latest.value, latest.details, latest.window_start
+                   from metrics m left join lateral (
+                       select value, details, window_start from observations o
+                       where o.metric_id = m.id and o.scope = '{}' order by window_start desc limit 1
+                   ) latest on true where m.id = any(%s)""",
+                (list(CATALOG),),
+            ).fetchall()
+        registry = {row["id"]: row for row in rows}
+        entries = []
+        for identifier, definition in CATALOG.items():
+            row = registry.get(identifier)
+            entries.append({
+                **definition, "legacy_ids": [old for old, current in LEGACY.items() if current == identifier],
+                "registered": row is not None, "readings_available": bool(row and row["value"] is not None),
+                "alerts_enabled": bool(row and row["direction"] != "none"), "latest": row,
+            })
+        return entries
+
+    @app.post("/api/catalog/{metric_id}/register")
+    def register_catalog_metric(metric_id: str):
+        if metric_id not in CATALOG:
+            raise HTTPException(404, "Unknown catalog metric.")
+        return runtime.register(dsn, CATALOG[metric_id], model)
+
+    @app.get("/api/catalog/{metric_id}/readings")
+    def catalog_readings(metric_id: str, start: datetime | None = None, end: datetime | None = None,
+                         as_of: datetime | None = None, scope: str = "{}",
+                         bucket_minutes: int = Query(5, ge=1)):
+        definition = CATALOG.get(metric_id)
+        if not definition:
+            raise HTTPException(404, "Unknown catalog metric.")
+        try:
+            filters = json.loads(scope)
+            if not isinstance(filters, dict) or not set(filters).issubset(definition["dimensions"]):
+                raise ValueError("Scope must use the metric's declared dimensions.")
+            if not all(isinstance(value, str) for value in filters.values()):
+                raise ValueError("Dimension filters must be strings.")
+            with connect(dsn) as db:
+                if not db.execute("select 1 from metrics where id = %s", (metric_id,)).fetchone():
+                    raise HTTPException(409, "This metric is awaiting registration.")
+                latest = db.execute("select * from windows order by start_at desc limit 1").fetchone()
+                if not latest:
+                    return {"metric_id": metric_id, "readings": []}
+                start = utc(start) if start else latest["start_at"]
+                end = utc(end) if end else latest["end_at"]
+                as_of = utc(as_of) if as_of else latest["observation_snapshot"] or latest["end_at"] + MAX_MATURITY
+                if start >= end or any(t.second or t.microsecond for t in (start, end)):
+                    raise ValueError("Use a positive interval with minute-aligned boundaries.")
+                if (definition["calculation"]["method"] == "budget" and
+                    start.astimezone(BERLIN).date() != (end - timedelta(microseconds=1)).astimezone(BERLIN).date()):
+                    raise ValueError("Daily budget utilization supports one Berlin business day per request.")
+                results = []
+                while start < end:
+                    boundary = min(start + timedelta(minutes=bucket_minutes), end)
+                    facts = Facts(db, start, boundary, as_of)
+                    _, value, size, details = next(metric_readings(definition, facts, scope=filters))
+                    results.append({"window_start": start, "scope": filters, "value": value,
+                                    "sample_size": size, "details": details})
+                    start = boundary
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {"metric_id": metric_id, "readings": results}
 
     @app.post("/api/metrics")
     def register_metric(metric: MetricRegistration):
@@ -87,3 +176,9 @@ def make_app(dsn, model=None, demo=None):
     app.mount("/static", StaticFiles(directory=STATIC, check_dir=False), name="static")
     app.mount("/", mcp_app, name="observation")
     return app
+
+
+def utc(timestamp):
+    if timestamp.tzinfo is None:
+        return timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc)

@@ -25,7 +25,7 @@ def calculation_activities(calculation):
     return dict.fromkeys(
         value for key in ("activity", "denominator_activity")
         if isinstance(value := calculation.get(key), str) and value
-    )
+    ) | dict.fromkeys(calculation.get("activities", []))
 
 
 def attach_measures(db, metric_id, calculation, nodes):

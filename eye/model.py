@@ -21,14 +21,20 @@ def ask(model, role, system, prompt):
     return (model(system, prompt) if model else {}), {}
 
 
+def configured_devin():
+    key, org_id = os.getenv("DEVIN_API_KEY"), os.getenv("DEVIN_ORG_ID")
+    if key and org_id:
+        return DevinReasoner(key, org_id, mode=os.getenv("DEVIN_MODE"))
+    return None
+
+
 def configured_model():
     mode = os.getenv("EYE_MODEL")
     if mode == "devin":
-        key, org_id = os.getenv("DEVIN_API_KEY"), os.getenv("DEVIN_ORG_ID")
-        if not key or not org_id:
+        devin = configured_devin()
+        if not devin:
             log.warning("Devin requires DEVIN_API_KEY and DEVIN_ORG_ID. Using local reasoning fallback.")
-            return None
-        return DevinReasoner(key, org_id, mode=os.getenv("DEVIN_MODE"))
+        return devin
     name = os.getenv("MODEL_NAME")
     key = os.getenv("MODEL_API_KEY") or os.getenv("OPENAI_API_KEY")
     base = os.getenv("MODEL_BASE_URL", "https://api.openai.com/v1").rstrip("/")

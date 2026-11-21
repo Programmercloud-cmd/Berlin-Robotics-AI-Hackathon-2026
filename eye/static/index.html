@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#101718">
   <title>Eye of the System · Marketplace monitoring</title>
+  <link rel="stylesheet" href="/static/theme.css">
   <link rel="stylesheet" href="/static/style.css">
   <script defer src="/static/vendor/cytoscape.min.js"></script>
   <script defer src="/static/dashboard.js"></script>
 </head>
 <body>
-  <header class="topbar">
-    <div class="shell topbar-inner">
+  <header class="app-bar">
+    <div class="shell app-bar-row">
       <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Eye of the System</div>
       <div class="connection" role="status"><span class="status-dot" id="status-dot"></span><span id="status">Connecting</span></div>
     </div>
@@ -21,60 +21,89 @@
       <h1>Marketplace monitoring</h1>
       <div class="clock"><span>Last observed window</span><time id="window">—</time></div>
     </section>
-    <section class="overview" aria-label="Monitoring summary">
-      <div class="stat"><span>Discovered activities</span><strong id="activity-count">—</strong></div>
-      <div class="stat"><span>Monitored metrics</span><strong id="metric-count">—</strong></div>
-      <div class="stat"><span>Open incidents</span><strong id="open-count">—</strong></div>
-      <div class="stat"><span>Recovered incidents</span><strong id="recovered-count">—</strong></div>
-    </section>
-    <div class="workspace">
-      <section class="panel graph-panel" aria-labelledby="graph-title">
-        <div class="panel-header">
-          <div><h2 id="graph-title">Company graph</h2><span id="graph-count" class="panel-meta"></span></div>
-          <div class="segmented" aria-label="Graph view">
-            <button type="button" class="mode is-active" data-mode="overview" aria-pressed="true">Overview</button>
-            <button type="button" class="mode" data-mode="workflow" aria-pressed="false">Workflow</button>
-            <button type="button" class="mode" data-mode="all" aria-pressed="false">All links</button>
-          </div>
-        </div>
-        <div class="graph-stage">
-          <div id="graph" aria-label="Interactive company graph"></div>
-          <p class="graph-empty" id="graph-empty">Waiting for observed events</p>
-          <div class="graph-controls" aria-label="Graph zoom">
-            <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
-            <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
-            <button id="fit" type="button" aria-label="Fit graph to view">Fit</button>
-          </div>
-        </div>
-        <div class="graph-footer">
-          <div class="legend" aria-label="Graph legend">
-            <span><i class="key activity"></i>Activity</span>
-            <span><i class="key metric"></i>Metric</span>
-            <span><i class="key process"></i>Lifecycle</span>
-            <span><i class="key path"></i>Investigation</span>
-          </div>
-          <label class="visually-hidden" for="node-picker">Inspect a graph node</label>
-          <select id="node-picker"><option value="">Inspect a node</option></select>
-        </div>
-        <div id="inspector" class="inspector" hidden></div>
-      </section>
-      <section class="panel incident-panel" aria-labelledby="incidents-title">
-        <div class="panel-header"><div><h2 id="incidents-title">Investigations</h2><span id="incident-count" class="panel-meta"></span></div></div>
-        <div id="incident-list" class="incident-list" aria-label="Incidents"></div>
-        <div id="report" class="report"><p class="placeholder">Reports appear here when the monitor detects a change.</p></div>
-      </section>
+    <div class="workspace-tabs" role="tablist" aria-label="Workspace">
+      <button type="button" id="graph-tab" role="tab" aria-controls="graph-view" aria-selected="true">Graph</button>
+      <button type="button" id="table-tab" role="tab" aria-controls="table-view" aria-selected="false" tabindex="-1">Table</button>
     </div>
-    <section class="panel anomaly-panel" aria-labelledby="anomalies-title">
-      <div class="panel-header">
-        <div><h2 id="anomalies-title">Recent anomalies</h2><span id="anomaly-count" class="panel-meta"></span></div>
+    <div class="workspace" id="workspace">
+      <aside class="panel side-panel event-panel" id="event-panel" aria-labelledby="events-title">
+        <div class="panel-header">
+          <h2 id="events-title">Observed event log</h2>
+          <button type="button" class="icon-control" id="hide-events" aria-controls="event-panel" aria-label="Collapse observed event log">‹</button>
+        </div>
+        <div class="event-list" id="event-rows"><p class="placeholder">Waiting for observed events.</p></div>
+      </aside>
+      <button type="button" class="edge-toggle edge-left" id="show-events" aria-controls="event-panel" aria-expanded="false" hidden>Events <span aria-hidden="true">›</span></button>
+      <div class="center-view" id="graph-view" role="tabpanel" aria-labelledby="graph-tab">
+        <section class="panel graph-panel" id="graph-panel" aria-labelledby="graph-title">
+          <div class="panel-header">
+            <div><h2 id="graph-title">Company graph</h2><span id="graph-count" class="panel-meta"></span></div>
+            <button type="button" class="text-control" id="graph-fullscreen" aria-pressed="false">Fullscreen</button>
+          </div>
+          <div class="graph-stage">
+            <div id="graph" aria-label="Interactive company graph"></div>
+            <p class="graph-empty" id="graph-empty">Waiting for observed events</p>
+            <div class="mode-menu" id="mode-menu">
+              <button class="eye-button" type="button" id="mode-toggle" aria-label="Graph views" aria-controls="graph-modes" aria-expanded="false"><span class="eye-icon" aria-hidden="true"></span></button>
+              <div id="graph-modes" class="mode-options" aria-label="Graph views" inert>
+                <button type="button" class="mode is-active" data-mode="overview" aria-pressed="true">Overview</button>
+                <button type="button" class="mode" data-mode="workflow" aria-pressed="false">Workflow</button>
+                <button type="button" class="mode" data-mode="all" aria-pressed="false">All links</button>
+              </div>
+            </div>
+            <div class="graph-controls" aria-label="Graph zoom">
+              <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+              <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+              <button id="fit" type="button" aria-label="Fit graph to view">Fit</button>
+            </div>
+          </div>
+          <div class="graph-footer">
+            <div class="legend" aria-label="Graph legend">
+              <span><i class="key activity"></i>Activity</span>
+              <span><i class="key metric"></i>Metric</span>
+              <span><i class="key process"></i>Lifecycle</span>
+              <span><i class="key path"></i>Investigation</span>
+            </div>
+            <label class="visually-hidden" for="node-picker">Inspect a graph node</label>
+            <select id="node-picker"><option value="">Inspect a node</option></select>
+          </div>
+          <div id="inspector" class="inspector" hidden></div>
+        </section>
       </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th scope="col">Window (UTC)</th><th scope="col">Metric</th><th scope="col">Scope</th><th scope="col">Observed</th><th scope="col">Expected</th><th scope="col">Score</th></tr></thead>
-          <tbody id="anomaly-rows"></tbody>
-        </table>
-      </div>
-    </section>
+      <section class="panel center-view catalog-panel" id="table-view" role="tabpanel" aria-labelledby="table-tab" hidden>
+        <div class="panel-header">
+          <div><h2>Metric catalog</h2><span id="catalog-count" class="panel-meta" role="status"></span></div>
+          <label class="visually-hidden" for="catalog-filter">Filter metric catalog</label>
+          <input id="catalog-filter" type="search" placeholder="Filter metrics or sources">
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Metric</th><th scope="col">Source</th><th scope="col">Unit and dimensions</th><th scope="col">Readings</th><th scope="col">Alerts</th></tr></thead>
+            <tbody id="catalog-rows"></tbody>
+          </table>
+        </div>
+      </section>
+      <aside class="panel side-panel signal-panel" id="signals-panel" aria-label="Anomalies and investigations">
+        <section aria-labelledby="anomalies-title">
+          <div class="panel-header">
+            <div><h2 id="anomalies-title">Recent Anomalies</h2><span id="anomaly-count" class="panel-meta"></span></div>
+            <button type="button" class="icon-control" id="hide-signals" aria-controls="signals-panel" aria-label="Collapse anomalies and investigations">›</button>
+          </div>
+          <div class="table-wrap anomaly-scroll">
+            <table class="anomaly-table">
+              <thead><tr><th scope="col">Metric and scope</th><th scope="col">Observed</th><th scope="col">Expected</th></tr></thead>
+              <tbody id="anomaly-rows"></tbody>
+            </table>
+          </div>
+        </section>
+        <section aria-labelledby="incidents-title">
+          <div class="panel-header"><div><h2 id="incidents-title">Investigations</h2><span id="incident-count" class="panel-meta"></span></div></div>
+          <div id="incident-list" class="incident-list" aria-label="Incidents"></div>
+          <div id="report" class="report"><p class="placeholder">Reports appear here when the monitor detects a change.</p></div>
+        </section>
+      </aside>
+      <button type="button" class="edge-toggle edge-right" id="show-signals" aria-controls="signals-panel" aria-expanded="false" hidden><span aria-hidden="true">‹</span> Signals</button>
+    </div>
   </main>
 </body>
 </html>

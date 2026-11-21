@@ -98,12 +98,20 @@ def curate(db, metric, model=None):
             props["activity"] = activity
         put_node(db, source, "source", label, props)
         put_edge(db, node_id, source, "sourced_from", "calculation", definition["access"])
-    if calculation["op"] == "completeness":
+    if calculation["op"] == "completeness" or calculation.get("method") == "completeness":
         put_node(db, "source:windows", "source", "Closed-window manifests", {"table": "windows"})
         put_edge(db, node_id, "source:windows", "sourced_from", "calculation",
                  {"column": "expected_events"})
+        if calculation.get("method") == "completeness":
+            put_node(db, "source:source_manifests", "source", "Minute source manifests", {"table": "source_manifests"})
+            put_edge(db, node_id, "source:source_manifests", "sourced_from", "calculation", {})
 
     components = calculation_components(calculation)
+    existing_ids = {other["id"] for other in existing}
+    for component in calculation.get("components", []):
+        if component in existing_ids:
+            put_edge(db, node_id, f"metric:{component}", "calculated_from", "calculation",
+                     {"method": calculation["method"]})
     for other in existing:
         candidate = other["calculation"]
         if (candidate.get("op") != "count" or candidate.get("distinct") or

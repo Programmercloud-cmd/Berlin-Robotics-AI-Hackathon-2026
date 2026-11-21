@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eye of the System · Test Lab</title>
+  <link rel="stylesheet" href="/theme.css">
+  <link rel="stylesheet" href="/static/lab.css">
+  <script defer src="/static/lab.js"></script>
+</head>
+<body>
+  <header class="app-bar">
+    <div class="shell app-bar-row">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Eye of the System</div>
+      <nav aria-label="Local views">
+        <a href="http://127.0.0.1:8001/">Rehearsal controls</a>
+        <a id="eye-link" href="http://127.0.0.1:8000/" hidden>Open Eye</a>
+      </nav>
+    </div>
+  </header>
+  <main class="shell">
+    <div class="intro">
+      <h1>Test lab</h1>
+      <p class="connection" role="status"><span class="status-dot" id="status-dot"></span><span id="status">Connecting to the simulator.</span></p>
+    </div>
+    <section class="panel workflow" aria-labelledby="workflow">
+      <h2 id="workflow">Simulator ground truth</h2>
+      <ol class="steps">
+        <li>Session</li><li>Product page requested</li><li>Successful product view</li><li>Cart</li><li>Checkout</li><li>Payment attempt</li>
+      </ol>
+      <ul class="outcomes" aria-label="Observed outcomes">
+        <li class="fault-stage"><strong>Page load fails</strong><span>Session ends before a successful view</span></li>
+        <li><strong>Authorized</strong><span>Order confirmed</span></li>
+        <li><strong>Declined</strong><span>Checkout ends</span></li>
+        <li class="fault-stage"><strong>Timed out</strong><span>Checkout ends</span></li>
+      </ul>
+      <p>Shoppers can abandon the journey or view more products. Stock gates checkout, and the simulator publishes inventory snapshots each hour.</p>
+    </section>
+    <div class="workbench">
+      <section class="panel" aria-labelledby="chat-title">
+        <h2 id="chat-title">Devin chat</h2>
+        <ol id="messages" class="messages" aria-label="Conversation"></ol>
+        <form id="chat">
+          <label for="prompt">Describe a fault premise</label>
+          <textarea id="prompt" name="prompt" required maxlength="1500" rows="3" placeholder="Product pages hosted in Frankfurt fail to load."></textarea>
+          <button id="send" disabled>Ask Devin</button>
+        </form>
+        <section id="plan-preview" class="plan-preview" aria-label="Scenario preview" hidden></section>
+      </section>
+      <div class="sidebar">
+        <section class="panel" aria-labelledby="traffic">
+          <h2 id="traffic">Normal traffic</h2>
+          <p id="clock">Waiting for the baseline.</p>
+          <form id="normal" class="inline">
+            <label for="hours">Virtual hours</label>
+            <input id="hours" type="number" min="1" max="48" value="1" required>
+            <button id="generate" disabled>Generate traffic</button>
+          </form>
+          <details>
+            <summary>Replay a saved scenario</summary>
+            <form id="replay">
+              <label for="scenario-file">Scenario JSON</label>
+              <input id="scenario-file" type="file" accept=".json,application/json" required>
+              <button id="import">Review saved scenario</button>
+            </form>
+          </details>
+        </section>
+        <section class="panel" aria-labelledby="results">
+          <h2 id="results">Run timeline</h2>
+          <div id="runs"><p>Applied scenarios and generated windows appear here.</p></div>
+        </section>
+      </div>
+    </div>
+  </main>
+  <p id="error" role="alert" hidden></p>
+</body>
+</html>

@@ -5,6 +5,7 @@ from datetime import datetime
 
 from eye import curation, graph, investigation, monitor
 from eye.db import connect, set_state, setup, state
+from eye.metric_catalog import CATALOG, INITIAL_METRICS, LEGACY, STAGED
 
 log = logging.getLogger(__name__)
 
@@ -12,27 +13,44 @@ log = logging.getLogger(__name__)
 def initialize(dsn):
     with connect(dsn) as db:
         setup(db)
-        if state(db, "baseline_through"):
+        previous = state(db, "baseline_through")
+        if previous and state(db, "metric_catalog_version") == 1:
             return True
-        baseline = db.execute("select max(start_at) as value from windows").fetchone()["value"]
+        baseline = (datetime.fromisoformat(previous) if previous else
+                    db.execute("select max(start_at) as value from windows").fetchone()["value"])
         if baseline is None:
             return False
         graph.discover(db)
-        for metric in monitor.INITIAL_METRICS:
+        staged = db.execute("select id from metrics where id = any(%s)", (list(STAGED),)).fetchall()
+        for metric in [*INITIAL_METRICS, *(CATALOG[row["id"]] for row in staged)]:
             curation.curate(db, metric)
+        db.execute("update metrics set direction = 'none' where id = any(%s)", (list(LEGACY),))
+        if previous:
+            db.execute("""delete from observations where metric_id = any(%s)""", (list(CATALOG),))
         monitor.materialize(db)
         graph.associate(db)
-        for key in ("baseline_through", "last_window", "last_discovery"):
-            set_state(db, key, baseline.isoformat())
+        if not previous:
+            for key in ("baseline_through", "last_window", "last_discovery"):
+                set_state(db, key, baseline.isoformat())
+        set_state(db, "metric_catalog_version", 1)
         log.info("Established historical baseline through %s", baseline)
     return True
 
 
 def register(dsn, metric, model=None):
+    if definition := CATALOG.get(metric["id"]):
+        metric = {**definition, "direction": metric.get("direction", definition["direction"])}
     monitor.validate_calculation(metric["calculation"])
     with connect(dsn) as db:
         result = curation.curate(db, metric, model)
         monitor.materialize(db, metric_id=metric["id"])
+        graph.associate(db)
+    return result
+
+
+def enrich_registered_metric(dsn, metric, model):
+    with connect(dsn) as db:
+        result = curation.curate(db, metric, model)
         graph.associate(db)
     return result
 

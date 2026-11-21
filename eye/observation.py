@@ -35,7 +35,7 @@ def make_mcp(dsn=None, *, db=None):
                         scope: dict | None = None) -> dict[str, Any]:
         """Read observations in the half-open UTC time interval. Empty scope selects the total."""
         return {"data": read(
-            """select window_start, scope, value, sample_size from observations
+            """select window_start, scope, value, sample_size, details from observations
                where metric_id = %s and window_start >= %s and window_start < %s and scope = %s
                order by window_start desc limit 500""",
             (metric_id, start, end, Jsonb(scope or {})),
@@ -45,7 +45,7 @@ def make_mcp(dsn=None, *, db=None):
     def metric_breakdown(metric_id: str, window_start: datetime) -> dict[str, Any]:
         """Read available dimensional scopes of a metric in a closed observation window."""
         return {"data": read(
-            """select scope, value, sample_size from observations
+            """select scope, value, sample_size, details from observations
                where metric_id = %s and window_start = %s order by sample_size desc limit 250""",
             (metric_id, window_start),
         )}

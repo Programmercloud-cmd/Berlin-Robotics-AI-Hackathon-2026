@@ -1,6 +1,7 @@
 """Investigate anomalous windows with the read-only observation tools."""
 
 import json
+import logging
 from collections import deque
 from datetime import datetime, timedelta
 from statistics import fmean
@@ -8,11 +9,12 @@ from statistics import fmean
 import networkx as nx
 from psycopg.types.json import Jsonb
 
-from eye.db import state
+from eye.db import connect, state
 from eye.model import ask
 from eye.observation import observation_tool
 
 HOUR = timedelta(hours=1)
+log = logging.getLogger(__name__)
 PRIORITY = {
     "measures": 0, "calculated_from": 1, "precedes": 2, "depends_on": 3,
     "part_of": 4, "associated_with": 5, "may_influence": 6, "sourced_from": 7,
@@ -20,6 +22,9 @@ PRIORITY = {
 REPORT_PROMPT = """Investigate this marketplace anomaly using only the provided observations.
 Distinguish the observed failure mechanism from an unverified underlying cause.
 Use scoped observation evidence and reference the graph or metric evidence by node ID.
+Use the earliest observed funnel break when available. Customer geography does
+not establish a hosting location. Name a hosting location only when an observed
+event explicitly identifies it.
 Estimate business impact from comparable observations and state the uncertainty.
 Return a JSON object with summary (string), likely_causes (list of short strings),
 impact (string), and uncertainty (string). Do not invent facts or quantities."""
@@ -55,8 +60,12 @@ def related(graph, first, second):
 def reference(tool, metric_id, start, scope, baseline):
     historic = tool("metric_readings", metric_id=metric_id, start=baseline - timedelta(days=5),
                     end=baseline + HOUR, scope=scope)
+    historic = [row for row in historic if row["value"] is not None]
     hourly = [row for row in historic if datetime.fromisoformat(row["window_start"]).hour == start.hour]
     periods = hourly or historic
+    if periods and all(row["details"].get("denominator") for row in periods):
+        return (sum(row["details"]["numerator"] for row in periods) /
+                sum(row["details"]["denominator"] for row in periods))
     return fmean(row["value"] for row in periods) if periods else None
 
 
@@ -66,7 +75,7 @@ def signal(tool, metric_id, start, scope, baseline):
         return None
     scope = {key: value for key, value in scope.items() if key in definition["dimensions"]}
     readings = tool("metric_readings", metric_id=metric_id, start=start, end=start + HOUR, scope=scope)
-    if not readings:
+    if not readings or readings[-1]["value"] is None:
         return None
     observed = readings[-1]["value"]
     expected = reference(tool, metric_id, start, scope, baseline)
@@ -77,7 +86,30 @@ def signal(tool, metric_id, start, scope, baseline):
     }
 
 
-def investigate(db, tool, anomaly, incident, model, baseline):
+def first_funnel_break(db, tool, start, scope, baseline, incident):
+    stages = ("sessions", "product_view_sessions", "add_to_cart_sessions", "checkout_sessions")
+    previous = None
+    for identifier in stages:
+        current = signal(tool, identifier, start, scope, baseline)
+        if (previous and current and previous["scope"] == current["scope"]
+                and previous["observed"] >= 30 and previous["expected"]
+                and current["expected"] is not None):
+            observed = current["observed"] / previous["observed"]
+            expected = current["expected"] / previous["expected"]
+            if expected - observed >= 0.10:
+                text = (f"{current['name']} was the first measured funnel drop in this scope. "
+                        f"{current['observed']:.0f} of {previous['observed']:.0f} reached that step "
+                        f"({observed:.1%} versus {expected:.1%} expected). "
+                        f"Evidence: {metric_node(previous['metric_id'])}, {metric_node(identifier)}.")
+                add_evidence(db, incident, start, "first observable break",
+                             {"upstream": previous, "downstream": current,
+                              "observed_share": observed, "expected_share": expected}, metric_node(identifier))
+                return text, identifier, current["scope"]
+        previous = current
+    return None, None, None
+
+
+def collect_evidence(db, tool, anomaly, incident, baseline):
     start, scope = anomaly["window_start"], anomaly["scope"]
     root = metric_node(anomaly["metric_id"])
     add_evidence(db, incident, start, "anomaly", anomaly, root)
@@ -124,11 +156,23 @@ def investigate(db, tool, anomaly, incident, model, baseline):
                 seen.add(neighbor)
                 queue.append((neighbor, depth + 1, link))
 
+    first_break, stage, break_scope = first_funnel_break(db, tool, start, scope, baseline, incident)
+    page_errors = []
+    if stage == "product_view_sessions":
+        activity = "activity:product_page_load_failed"
+        if tool("graph_neighbors", node_id=activity).get("node"):
+            page_errors = tool("supporting_events", window_start=start, scope=break_scope,
+                               activities=["product_page_load_failed"], limit=3)
+            if page_errors:
+                samples.append({"node": activity, "events": page_errors})
+                add_evidence(db, incident, start, "observed events", page_errors, activity)
+
     definition = tool("metric_definition", metric_id=anomaly["metric_id"])
     label = definition["name"]
     scope_label = ", ".join(f"{key} {value}" for key, value in sorted(scope.items())) or "all traffic"
     estimate = abs(anomaly["expected"] - anomaly["observed"])
-    is_rate = definition["calculation"]["op"] in {"ratio", "share"}
+    is_rate = (definition["calculation"]["op"] in {"ratio", "share"}
+               or definition["access"].get("unit") == "ratio")
     if is_rate:
         summary = (f"{label} reached {anomaly['observed']:.1%} versus "
                    f"{anomaly['expected']:.1%} expected in {scope_label}.")
@@ -149,25 +193,87 @@ def investigate(db, tool, anomaly, incident, model, baseline):
         f"of {row['expected']:.1f} ({metric_node(row['metric_id'])})."
         for row in candidates[:2]
     ] or ["The graph shows related activities, but this window does not isolate the failure mechanism."]
+    if page_errors:
+        example = page_errors[0]
+        status = example["attrs"].get("http_status")
+        likely = [
+            f"Product-page requests failed before a successful view. "
+            f"Observed event {example['id']} recorded HTTP {status} ({activity})."
+        ]
     report = {
         "summary": summary, "likely_causes": likely, "impact": impact,
         "uncertainty": "The observations establish the deviation and its scope. The underlying operational cause remains unverified.",
         "affected_scope": scope, "path": paths, "reasoning": "statistical",
     }
-    if model:
-        answer, provenance = ask(model, "investigation", REPORT_PROMPT, {
-            "anomaly": anomaly, "metric": label, "affected_scope": scope,
-            "baseline_impact": impact, "metric_evidence": signals, "event_evidence": samples,
-            "segment_comparison": comparisons, "context": window_context, "graph_path": paths,
-        })
-        usable = {key: answer[key] for key in ("summary", "impact", "uncertainty")
-                  if isinstance(answer.get(key), str) and answer[key].strip()}
-        causes = answer.get("likely_causes")
-        if isinstance(causes, list) and all(isinstance(item, str) for item in causes) and causes:
-            usable["likely_causes"] = causes
-        if usable:
-            report.update(usable, reasoning="model", **provenance)
-    return report
+    if first_break:
+        report["first_observable_break"] = first_break
+        report["uncertainty"] = "The evidence shows where the funnel broke. The underlying cause and hosting location remain unverified."
+    context = {
+        "anomaly": anomaly, "metric": label, "affected_scope": scope,
+        "baseline_impact": impact, "metric_evidence": signals, "event_evidence": samples,
+        "segment_comparison": comparisons, "context": window_context, "graph_path": paths,
+        "first_observable_break": first_break,
+    }
+    return report, context
+
+
+def resolve_report(model, context, fallback):
+    answer, provenance = ask(model, "investigation", REPORT_PROMPT, context)
+    frankfurt_observed = any(
+        "frankfurt" in str(row.get("attrs", {}).get(field, "")).casefold()
+        for sample in context.get("event_evidence", ()) for row in sample.get("events", ())
+        for field in ("hosting_location", "hosting_region", "datacenter", "edge_location")
+    )
+
+    def supported(text):
+        return (isinstance(text, str) and bool(text.strip())
+                and (frankfurt_observed or "frankfurt" not in text.casefold()))
+
+    usable = {key: answer[key] for key in ("summary", "impact", "uncertainty")
+              if supported(answer.get(key))}
+    causes = answer.get("likely_causes")
+    if isinstance(causes, list) and all(isinstance(item, str) for item in causes) and causes:
+        supported_causes = [cause for cause in causes if supported(cause)]
+        if supported_causes:
+            usable["likely_causes"] = supported_causes
+    if usable:
+        return {**fallback, **usable, "reasoning": "model", **provenance}
+    return fallback
+
+
+def finish_next_report(dsn, model, stop):
+    with connect(dsn) as db:
+        # A session lock permits one report worker per database, without holding a
+        # transaction or an incident row lock during the provider request.
+        if not db.execute("select pg_try_advisory_lock(hashtext('eye.pending_reports')) as claimed"
+                          ).fetchone()["claimed"]:
+            return False
+        job = db.execute("select * from pending_reports order by incident_id limit 1").fetchone()
+        db.commit()
+        if not job or stop.is_set():
+            return False
+        try:
+            report = resolve_report(model, job["context"], job["fallback"])
+        except Exception as exc:
+            log.warning("Investigation provider failed (%s). Using the statistical report.", type(exc).__name__)
+            report = job["fallback"]
+        if stop.is_set():
+            return False
+        db.execute("update incidents set report = report || %s where id = %s",
+                   (jsonb(report), job["incident_id"]))
+        db.execute("delete from pending_reports where incident_id = %s", (job["incident_id"],))
+        return True
+
+
+def watch_reports(dsn, stop, model, poll=0.5):
+    while not stop.is_set():
+        try:
+            if finish_next_report(dsn, model, stop):
+                continue
+        except Exception:
+            log.exception("Pending report could not be saved and will be retried")
+            stop.wait(2)
+        stop.wait(poll)
 
 
 def track(db, start, anomalies, model=None):
@@ -183,7 +289,7 @@ def track(db, start, anomalies, model=None):
     ).fetchall())
     pending = list(anomalies)
     health = tool("metric_readings", metric_id="data_completeness_ratio", start=start, end=start + HOUR)
-    good_data = not health or health[-1]["value"] >= 0.97
+    good_data = not health or (health[-1]["value"] is not None and health[-1]["value"] >= 0.97)
     for incident in open_incidents:
         anchor = next((row for row in pending if row["metric_id"] == incident["metric_id"]
                        and row["scope"] == incident["scope"]), None)
@@ -198,22 +304,24 @@ def track(db, start, anomalies, model=None):
 
         current = tool("metric_readings", metric_id=incident["metric_id"], start=start,
                        end=start + HOUR, scope=incident["scope"])
-        kind = tool("metric_definition", metric_id=incident["metric_id"])["calculation"]["op"]
-        adequate = current and (kind not in {"ratio", "share"} or current[-1]["sample_size"] >= 30)
+        metric = tool("metric_definition", metric_id=incident["metric_id"])
+        ratio = metric["calculation"]["op"] in {"ratio", "share"} or metric["access"].get("unit") == "ratio"
+        adequate = (current and current[-1]["value"] is not None and
+                    (not ratio or current[-1]["sample_size"] >= 30))
         if not adequate or not good_data:
             db.execute("update incidents set healthy_windows = 0 where id = %s", (incident["id"],))
             continue
         streak = incident["healthy_windows"] + 1
         recovered = start if streak >= 2 else None
-        report = incident["report"]
+        recovery = {}
         if recovered:
-            report["recovery"] = "The affected segment returned to its baseline range for two observed windows."
+            recovery["recovery"] = "The affected segment returned to its baseline range for two observed windows."
         add_evidence(db, incident["id"], start, "recovery observation", current[-1],
                      metric_node(incident["metric_id"]))
         db.execute(
             """update incidents set updated_at = %s, healthy_windows = %s,
-               recovered_at = %s, report = %s where id = %s""",
-            (start, streak, recovered, jsonb(report), incident["id"]),
+               recovered_at = %s, report = report || %s where id = %s""",
+            (start, streak, recovered, jsonb(recovery), incident["id"]),
         )
 
     baseline = datetime.fromisoformat(state(db, "baseline_through"))
@@ -225,9 +333,14 @@ def track(db, start, anomalies, model=None):
                values (%s, %s, %s, %s) returning id""",
             (anchor["metric_id"], jsonb(anchor["scope"]), start, start),
         ).fetchone()["id"]
-        report = investigate(db, tool, anchor, incident, model, baseline)
+        report, context = collect_evidence(db, tool, anchor, incident, baseline)
         for row in nearby:
             pending.remove(row)
             if row != anchor:
                 add_evidence(db, incident, start, "related anomaly", row, metric_node(row["metric_id"]))
+        if model:
+            db.execute("insert into pending_reports values (%s, %s, %s)",
+                       (incident, jsonb(context), jsonb(report)))
+            report = {key: report[key] for key in
+                      ("summary", "affected_scope", "path", "first_observable_break") if key in report}
         db.execute("update incidents set report = %s where id = %s", (jsonb(report), incident))

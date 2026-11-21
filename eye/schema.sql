@@ -6,6 +6,7 @@ create table if not exists windows (
     end_at timestamptz not null,
     expected_events integer not null
 );
+alter table windows add column if not exists observation_snapshot timestamptz;
 
 create table if not exists events (
     id text primary key,
@@ -16,6 +17,17 @@ create table if not exists events (
     attrs jsonb not null default '{}'
 );
 create index if not exists events_window_activity on events(window_start, activity);
+create index if not exists events_occurrence on events(occurred_at);
+create index if not exists inventory_occurrence on events(occurred_at) where activity = 'inventory_snapshot';
+
+create table if not exists source_manifests (
+    window_start timestamptz not null references windows(start_at),
+    minute_at timestamptz not null,
+    source_id text not null,
+    event_type text not null,
+    expected integer not null,
+    primary key (minute_at, source_id, event_type)
+);
 
 create table if not exists objects (
     id text primary key,
@@ -49,6 +61,10 @@ create table if not exists observations (
     sample_size integer not null,
     primary key (metric_id, window_start, scope)
 );
+alter table observations alter column value drop not null;
+alter table observations add column if not exists details jsonb not null default '{}';
+create index if not exists aggregate_observations_recent on observations(metric_id, window_start desc)
+    where scope = '{}';
 
 create table if not exists graph_nodes (
     id text primary key,
@@ -79,6 +95,7 @@ create table if not exists anomalies (
     sample_size integer not null,
     unique (metric_id, window_start, scope)
 );
+alter table anomalies add column if not exists detected_at timestamptz default clock_timestamp();
 
 create table if not exists incidents (
     id bigint generated always as identity primary key,
@@ -92,6 +109,12 @@ create table if not exists incidents (
 );
 create unique index if not exists incidents_open_scope on incidents(metric_id, scope)
     where recovered_at is null;
+
+create table if not exists pending_reports (
+    incident_id bigint primary key references incidents(id),
+    context jsonb not null,
+    fallback jsonb not null
+);
 
 create table if not exists evidence (
     id bigint generated always as identity primary key,

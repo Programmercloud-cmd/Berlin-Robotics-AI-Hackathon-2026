@@ -8,7 +8,8 @@ from psycopg.types.json import Jsonb
 
 
 def connect(url=None):
-    load_dotenv()
+    if not url and not os.environ.get("DATABASE_URL"):
+        load_dotenv()
     dsn = url or os.environ.get("DATABASE_URL")
     if not dsn:
         raise RuntimeError("Set DATABASE_URL to a PostgreSQL connection string.")

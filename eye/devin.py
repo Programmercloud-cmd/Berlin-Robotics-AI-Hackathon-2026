@@ -7,6 +7,8 @@ from urllib.parse import quote
 
 import httpx
 
+from eye.scenario import ScenarioReply
+
 log = logging.getLogger(__name__)
 SESSION_TIMEOUT = 480
 POLL_INTERVAL = 10
@@ -29,6 +31,7 @@ def object_schema(fields):
 
 
 ROLES = {
+    "scenario": ("test lab scenario", ScenarioReply.model_json_schema()),
     "investigation": ("incident investigation", object_schema(REPORT_FIELDS)),
     "curation": ("graph curation", object_schema({
         "relationships": {

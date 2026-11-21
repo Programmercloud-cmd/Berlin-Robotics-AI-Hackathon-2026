@@ -12,18 +12,19 @@ from eye.devin import SESSION_TIMEOUT, DevinReasoner
 
 log = logging.getLogger(__name__)
 HOUR = timedelta(hours=1)
+PAYMENT_SCOPE = {key if key != "provider" else "payment_provider": value
+                 for key, value in simulator.PAYMENT_SCOPE.items()}
 
 
 def run(dsn, stop, model, delay=1.0, search=False, verify_devin=False):
     clock = simulator.DEMO_START
-    window_timeout = 180 + (SESSION_TIMEOUT if isinstance(model, DevinReasoner) else 0)
 
     def publish(traffic=1.0, fault=False, search_disruption=False):
         nonlocal clock
         with connect(dsn) as db:
-            simulator.emit(db, clock, traffic=traffic, fault=fault, search=search,
+            simulator.emit(db, clock, traffic=traffic, fault=fault,
                            search_disruption=search_disruption)
-        deadline = time.monotonic() + window_timeout
+        deadline = time.monotonic() + 180
         while not stop.is_set() and time.monotonic() < deadline:
             with connect(dsn) as db:
                 current = state(db, "last_window")
@@ -53,12 +54,12 @@ def run(dsn, stop, model, delay=1.0, search=False, verify_devin=False):
             detected = db.execute("""
                 select a.* from anomalies a
                 where a.metric_id = 'payment_success_rate'
-                  and a.scope ?& array['country', 'platform', 'provider']
+                  and a.scope ?& array['country', 'platform', 'payment_provider']
                 order by a.score desc limit 1
                 """).fetchone()
         if detected:
             break
-    if detected is None or detected["scope"] != simulator.PAYMENT_SCOPE:
+    if detected is None or detected["scope"] != PAYMENT_SCOPE:
         raise RuntimeError("No segmented payment anomaly was detected before registration")
     metric = monitor.TIMEOUT_RATE_METRIC
     with connect(dsn) as db:
@@ -68,7 +69,7 @@ def run(dsn, stop, model, delay=1.0, search=False, verify_devin=False):
     log.info("Demo · detected %s in %s before registration",
              detected["metric_id"], detected["scope"])
 
-    registration = runtime.register(dsn, metric, model)
+    registration = runtime.register(dsn, metric)
     log.info("Demo · registered %s", metric["id"])
     publish(fault=True)
     publish(fault=True)
@@ -95,12 +96,30 @@ def run(dsn, stop, model, delay=1.0, search=False, verify_devin=False):
                   Jsonb(detected["scope"]), detected["metric_id"])).fetchone()
     if facts["still_open"] or not all(value for key, value in facts.items() if key != "still_open"):
         raise RuntimeError(f"Demo did not complete graph extension and recovery: {facts}")
+    if model:
+        # Publish the rehearsal windows with the registered calculation available
+        # even while the provider is still preparing an incident report.
+        registration = runtime.enrich_registered_metric(dsn, metric, model)
+        wait_for_reports(dsn, stop, model)
     log.info("Payment demo complete · %s · curation %s", facts, registration.get("reasoning", "unknown"))
     if verify_devin:
         check_devin(dsn, detected, metric["id"])
     if search:
-        run_search(dsn, publish, model)
+        run_search(dsn, publish)
+        wait_for_reports(dsn, stop, model)
     return facts
+
+
+def wait_for_reports(dsn, stop, model):
+    timeout = 180 + (SESSION_TIMEOUT if isinstance(model, DevinReasoner) else 0)
+    deadline = time.monotonic() + timeout
+    while not stop.is_set() and time.monotonic() < deadline:
+        with connect(dsn) as db:
+            if not db.execute("select 1 from pending_reports limit 1").fetchone():
+                return
+        stop.wait(0.25)
+    if not stop.is_set():
+        raise RuntimeError("Investigation reports are still pending.")
 
 
 def check_devin(dsn, detected, metric_id):
@@ -126,20 +145,7 @@ def check_devin(dsn, detected, metric_id):
     log.info("Verified Devin incident report and payment_timeout_rate graph proposal from separate sessions")
 
 
-def run_search(dsn, publish, model):
-    metric = monitor.metric
-    dimensions = monitor.JOURNEY
-    additions = [
-        metric("searches", "Search requests", "Marketplace search requests.",
-               "count", "search_requested", dimensions),
-        metric("zero_result_searches", "Zero-result searches", "Search requests with no results.",
-               "count", "search_requested", dimensions, direction="none", where={"result_count": 0}),
-        metric("search_click_rate", "Search click rate", "Searches with a result click per request.",
-               "ratio", "search_result_clicked", dimensions, denominator_activity="search_requested"),
-    ]
-    log.info("Demo · registering metrics from the discovered search lifecycle")
-    for definition in additions:
-        runtime.register(dsn, definition, model)
+def run_search(dsn, publish):
     log.info("Demo · search disruption")
     for _ in range(2):
         publish(search_disruption=True)
