@@ -3,6 +3,8 @@
 from collections import defaultdict
 from math import sqrt
 
+from scipy.stats import binom
+
 from eye.transitions import BY_ID
 
 PROJECTIONS = {"checkout_sessions": "checkout", "payment_attempts": "payment",
@@ -68,19 +70,22 @@ def projected_loss(paths, step, scope, measure):
         counts[2] += eligible
         if exposed and eligible and len(examples) < 2:
             examples.append({"anchor": anchor["id"], "attempt": attempt["id"], "completion": completed["id"] if completed else None})
-    loss = control_eligible = control_completed = exposed_n = control_n = variance = 0
+    loss = exposed_n = control_n = variance = 0
     for (nc, rc, ec), (ne, re, _) in buckets.values():
         if not ne or not nc:
             continue
         loss += ne * rc / nc - re
         exposed_n += ne
         control_n += nc
-        control_eligible += ec
-        control_completed += rc
         p = (rc + .5) / (nc + 1)
         variance += p * (1 - p) * (ne + ne * ne / nc)
+    control_eligible = sum(control[2] for control, _ in buckets.values())
+    control_completed = sum(control[1] for control, _ in buckets.values())
+    exposed_eligible = sum(exposed[2] for _, exposed in buckets.values())
+    exposed_completed = sum(exposed[1] for _, exposed in buckets.values())
     return {"lost": loss, "matched_exposed": exposed_n, "matched_control": control_n,
             "control_eligible": control_eligible, "control_completed": control_completed,
+            "exposed_eligible": exposed_eligible, "exposed_completed": exposed_completed,
             "standard_error": sqrt(variance), "linked_event_ids": examples}
 
 
@@ -101,24 +106,30 @@ def assess(paths, kind, target, readings):
     conditional_loss = rate["eligible"] * baseline_rate - rate["completed"]
     if gate:
         denominator = projection["control_eligible"]
-        control_rate = projection["control_completed"] / denominator if denominator else None
-        independent = denominator >= 25 and baseline_rate - control_rate > max(.09, 2 * sqrt(baseline_rate * (1-baseline_rate) / denominator))
-        enough = denominator >= 12 and not independent
+        completed = projection["control_completed"]
+        control_rate = completed / denominator if denominator else None
+        prior = (rate["baseline_completed"] + .5) / (rate["baseline_eligible"] + 1)
+        independent = denominator >= 25 and binom.cdf(completed, denominator, prior) <= .001
+        enough = denominator >= 25 and baseline_rate - control_rate < .07
         shortfall = conditional_loss
-        explained = projection["lost"]
+        # Each eligible cart is tied to an observed previous stock state. Estimate its
+        # missing checkouts at the historical rate, including strata with no stocked cart.
+        explained = projection["exposed_eligible"] * baseline_rate - projection["exposed_completed"]
+        standard_error = sqrt(projection["exposed_eligible"] * baseline_rate * (1 - baseline_rate))
     else:
         control_rate = rate["observed"]
         independent = rate["status"] == "degraded"
         enough = rate["status"] == "steady"
         shortfall = missing_attempts if target["metric_id"] == "payment_attempts" else missing_attempts * baseline_rate + conditional_loss
         explained = projection["lost"] if target["metric_id"] == "payment_attempts" else projection["lost"] * baseline_rate
+        standard_error = projection["standard_error"]
     remainder = max(0, shortfall - explained)
     status, reason = "provisional", "The linked cohorts leave a material volume gap or too little conditional evidence."
     if independent:
         status, reason = "independent", "Completion fell among comparable attempts even after accounting for upstream loss."
     elif (enough and projection["matched_exposed"] >= 12 and projection["matched_control"] >= 12
           and shortfall >= 4 and explained >= .55 * shortfall
-          and remainder <= max(4, 1.64 * projection["standard_error"])):
+          and remainder <= max(4, 1.64 * standard_error)):
         status, reason = "linked", "The linked upstream loss accounts for the scoped volume shortfall within sampling uncertainty."
     return {"status": status, "reason": reason, "scope": scope, "metric_id": target["metric_id"],
             "baseline_attempts": baseline_attempts, "eligible_attempts": rate["eligible"],

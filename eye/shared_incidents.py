@@ -139,6 +139,9 @@ def revisit_groups(db, start, cutoff, readings, facts):
             if status == "linked" and not supported:
                 status = "provisional"
                 decision.update(status=status, reason="The measured upstream change still has provisional cohort support.")
+            if status == "linked" and previous is None:
+                status = "provisional"
+                decision.update(status=status, reason="The first matching window supports an upstream link. Eye will check the next window before grouping.")
             if previous == "linked" and status != "independent":
                 continue
             if previous is None and status == "independent":

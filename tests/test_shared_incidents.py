@@ -2,6 +2,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from eye.cohort_evidence import matched_cohorts, supports_link
+from eye.downstream_impact import assess, linked_steps
 from eye.shared_incidents import conflicting_step, source_plans
 
 
@@ -13,6 +14,36 @@ def event(identifier, activity, second, **attrs):
 
 
 class SharedEvidenceTest(unittest.TestCase):
+    def test_payment_completion_requires_matching_cart_order_and_payment(self):
+        rows = [event("cart", "cart_added", 1), event("wrong-checkout", "checkout_started", 2, order_id="x"),
+                event("checkout", "checkout_started", 2, order_id="o"),
+                event("attempt", "payment_attempted", 3, order_id="o", payment_id="p"),
+                event("other", "payment_succeeded", 4, order_id="o", payment_id="q"),
+                event("paid", "payment_succeeded", 5, order_id="o", payment_id="p"),
+                event("order", "order_confirmed", 6, order_id="o", payment_id="p")]
+        carts = {"cart": "c", "checkout": "c", "wrong-checkout": "other", "attempt": "c"}
+        self.assertEqual(linked_steps(rows, carts)["payment"][1]["id"], "paid")
+        self.assertIsNone(linked_steps([row for row in rows if row["id"] != "paid"], carts)["payment"][1])
+
+    def test_stock_loss_accounts_for_depleted_carts_without_contemporaneous_controls(self):
+        class Readings:
+            historic = [1, 2, 3]
+
+            def get(self, _step, _scope):
+                return {"expected": .8, "eligible": 100, "completed": 40, "status": "degraded",
+                        "baseline_eligible": 300, "baseline_completed": 240}
+
+        target = {"metric_id": "checkout_sessions", "scope": {}}
+        cart = event("cart", "cart_added", 1)
+        checkout = event("checkout", "checkout_started", 2)
+        paths = [(i < 25, True, cart, {"checkout": (cart, None)}) for i in range(50)]
+        paths += [(True, False, cart, {"checkout": (cart, checkout if i < 40 else None)}) for i in range(50)]
+        decision = assess(paths, "stock", target, Readings())
+        self.assertEqual(decision["status"], "linked")
+        self.assertEqual(decision["upstream_explained"], 40)
+        bad_controls = [(True, False, cart, {"checkout": (cart, None)}) for _ in range(50)]
+        self.assertEqual(assess(paths[:50] + bad_controls, "stock", target, Readings())["status"], "independent")
+
     def test_later_stock_reading_cannot_explain_an_earlier_cart(self):
         rows = [event("s0", "inventory_snapshot", -4, sku="a", available_units=4),
                 event("s1", "inventory_snapshot", 30, sku="a", available_units=0)]

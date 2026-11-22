@@ -125,6 +125,7 @@ create table if not exists incident_relationships (
     decision jsonb not null,
     check (incident_id <> parent_id)
 );
+create index if not exists incident_relationships_parent on incident_relationships(parent_id);
 
 create or replace view incident_groups as
 select i.id,
