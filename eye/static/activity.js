@@ -4,7 +4,7 @@ const activityMap = document.getElementById("activity-map");
 const activityOpenedAt = Date.now();
 const newAlertDuration = 6000;
 const hourMs = 60 * 60 * 1000;
-const alertHistoryHours = 7;
+const rollingCadenceMs = 5 * 60 * 1000;
 let activityKey = "";
 let expandedActivityAlert = null;
 
@@ -51,7 +51,7 @@ function renderActivityGraph() {
   const investigations = newestFirst.map((incident) => ({
     id: incident.id,
     step: incidentStep(incident),
-    opened: date(incident.opened_at) + " UTC",
+    opened: date(incidentOpenedAt(incident)) + " UTC",
     recovery: incidentRecoveryStatus(incident),
     alerts: (alertLoads.get(incident.id)?.alerts ?? []).map((alert) => ({
       id: alert.id,
@@ -60,6 +60,8 @@ function renderActivityGraph() {
       affected: scope(alert.scope),
       time: date(alert.window_start) + " UTC",
       windowStart: alert.window_start,
+      windowEnd: alertWindowEnd(alert.window_start, alert.window_end),
+      observedAt: alert.observed_at,
       scope: alert.scope,
       status: incident.recovered_at ? "recovered" : alert.newUntil > now ? "new" : "investigating",
       observed: alert.observed,
@@ -156,7 +158,7 @@ function renderActivityAlertDetails(button, alert) {
   details.setAttribute("aria-labelledby", heading.id);
   button.setAttribute("aria-expanded", "true");
   button.setAttribute("aria-controls", details.id);
-  details.append(heading, element("p", [alert.label, alert.affected, alert.time].join(" · "), "panel-meta"));
+  details.append(heading, element("p", [alert.label, alert.affected].join(" · "), "panel-meta"));
 
   const metric = catalog.find((item) => item.id === alert.metricId || item.legacy_ids?.includes(alert.metricId));
   const definition = metric?.definition || nodes.get(metricID(alert.metricId))?.properties.definition;
@@ -164,11 +166,14 @@ function renderActivityAlertDetails(button, alert) {
   const unit = metric?.access.unit;
   const readingLabel = unit && !["count", "ratio"].includes(unit) ? `Observed vs baseline (${unit})` : "Observed vs baseline";
   const facts = element("dl", null, "activity-alert-facts");
-  for (const [label, value] of [
+  const fields = [
+    ["Observation window", alertWindow(alert.windowStart, alert.windowEnd)],
     [readingLabel, compareReading(alert, unit)],
     ["Sample size", number(alert.sampleSize)],
     ["Deviation score", number(alert.score) + " · cutoff 4"],
-  ]) {
+  ];
+  if (alert.observedAt) fields.splice(1, 0, ["Evaluated at", date(alert.observedAt) + " UTC"]);
+  for (const [label, value] of fields) {
     const fact = element("div");
     fact.append(element("dt", label), element("dd", value));
     facts.append(fact);
@@ -177,9 +182,9 @@ function renderActivityAlertDetails(button, alert) {
   const chart = element("figure", null, "activity-alert-chart");
   chart.hidden = true;
   details.append(chart);
-  readAlertHistory(alert).then((points) => {
+  readAlertHistory(alert).then(({ points, aligned }) => {
     if (points.slice(0, -1).filter(({ value }) => Number.isFinite(value)).length < 2) return;
-    renderAlertChart(chart, alert, unit, points);
+    renderAlertChart(chart, alert, unit, points, aligned);
     chart.hidden = false;
   }).catch(() => {});
   details.append(element("p", "Eye compared this window with the historical baseline for the same scope and applied the metric’s alert checks."));
@@ -195,50 +200,73 @@ function renderActivityAlertDetails(button, alert) {
   return details;
 }
 
+async function readActivityObservations(name, args) {
+  const response = await fetch("/mcp", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+  });
+  if (!response.ok) throw new Error("Readings unavailable");
+  const { result } = await response.json();
+  const rows = result?.structuredContent?.data;
+  if (result?.isError || !Array.isArray(rows)) throw new Error("Readings unavailable");
+  return rows;
+}
+
+async function loadActivityHistory(alert, start) {
+  const args = { metric_id: alert.metricId, scope: alert.scope };
+  if (alert.observedAt) {
+    try {
+      const rows = await readActivityObservations("alert_chart", { ...args, window_start: new Date(start).toISOString() });
+      return { aligned: true, points: rows.map((row) => ({ ...row, time: Date.parse(row.window_end) })) };
+    } catch {
+      // Older running Eye processes can still serve their recorded readings.
+    }
+  }
+  const hours = alert.observedAt ? 2 : 7;
+  const rows = await readActivityObservations("metric_readings", {
+    ...args, start: new Date(start - hours * hourMs).toISOString(), end: new Date(start).toISOString(),
+  });
+  return { aligned: false, points: rows.map((row) => ({
+    time: Date.parse(alertWindowEnd(row.window_start, row.details?.bucket_end)),
+    value: row.value, sample_size: row.sample_size, expected: alert.expected,
+  })) };
+}
+
 function readAlertHistory(alert) {
-  const end = Date.parse(alert.windowStart);
-  if (!Number.isFinite(end)) return Promise.resolve([]);
-  const start = end - alertHistoryHours * hourMs;
-  const key = JSON.stringify([alert.metricId, end, alert.scope]);
+  const start = Date.parse(alert.windowStart);
+  const end = Date.parse(alert.windowEnd);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return Promise.resolve({ points: [] });
+  const key = JSON.stringify([alert.metricId, start, alert.scope, alert.observedAt]);
   if (!alertHistory.has(key)) {
-    const request = fetch("/mcp", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
-      body: JSON.stringify({
-        jsonrpc: "2.0", id: 1, method: "tools/call",
-        params: { name: "metric_readings", arguments: {
-          metric_id: alert.metricId, scope: alert.scope,
-          start: new Date(start).toISOString(), end: new Date(end).toISOString(),
-        } },
-      }),
-    }).then(async (response) => {
-      if (!response.ok) throw new Error("Readings unavailable");
-      const { result } = await response.json();
-      const rows = result?.structuredContent?.data;
-      if (result?.isError || !Array.isArray(rows)) throw new Error("Readings unavailable");
-      return new Map(rows.map((row) => [Date.parse(row.window_start), row.value]));
-    }).catch((error) => {
+    const request = loadActivityHistory(alert, start).catch((error) => {
       alertHistory.delete(key);
       throw error;
     });
     alertHistory.set(key, request);
   }
-  return alertHistory.get(key).then((readings) => Array.from({ length: alertHistoryHours + 1 }, (_, i) => {
-    const time = start + i * hourMs;
-    return { time, value: time === end ? alert.observed : readings.get(time) };
+  return alertHistory.get(key).then(({ points, aligned }) => ({
+    aligned,
+    points: [...points.filter(({ time }) => time < end), {
+      ...points.find(({ time }) => time === end), time: end,
+      value: alert.observed, expected: alert.expected, sample_size: alert.sampleSize,
+    }],
   }));
 }
 
-function renderAlertChart(figure, alert, unit, points) {
+function renderAlertChart(figure, alert, unit, points, aligned) {
   const format = unit === "ratio" ? (value) => percent.format(value) : number;
-  const data = [...points.map(({ value }) => value), alert.expected].filter(Number.isFinite);
+  const data = points.flatMap(({ value, expected, p10, p90 }) => [value, expected, p10, p90]).filter(Number.isFinite);
   const min = Math.min(...data);
   const max = Math.max(...data);
   const padding = Math.max((max - min) * .14, Math.abs(max) * .025, .01);
   const low = min >= 0 ? Math.max(0, min - padding) : min - padding;
   const high = unit === "ratio" && max <= 1 ? Math.min(1, max + padding) : max + padding;
-  const left = 64, right = 505, top = 13, bottom = 105;
-  const x = (i) => left + (right - left) * i / alertHistoryHours;
+  const left = 64, right = 505, top = 15, bottom = 122;
+  const end = points.at(-1).time;
+  const start = end - (alert.observedAt ? 2 : 7) * hourMs;
+  const cadence = alert.observedAt ? rollingCadenceMs : hourMs;
+  const x = (time) => left + (right - left) * (time - start) / (end - start);
   const y = (value) => bottom - (bottom - top) * (value - low) / (high - low);
 
   const svg = (tag, attrs, text) => {
@@ -247,37 +275,67 @@ function renderAlertChart(figure, alert, unit, points) {
     if (text) item.textContent = text;
     return item;
   };
-  const chart = svg("svg", { viewBox: "0 0 520 130", role: "img",
-    "aria-label": `${alert.label} by hour for ${alert.affected}. Alert reading ${format(alert.observed)}. Alert baseline ${format(alert.expected)}.` });
+  const chart = svg("svg", { viewBox: "0 0 520 150", role: "img",
+    "aria-label": `${alert.label} over time for ${alert.affected}. Alert reading ${format(alert.observed)}. Alert baseline ${format(alert.expected)}.` });
   for (const value of [low, (low + high) / 2, high]) {
     const yy = y(value);
     chart.append(svg("line", { class: "chart-grid", x1: left, x2: right, y1: yy, y2: yy }),
       svg("text", { x: left - 7, y: yy, "text-anchor": "end", "dominant-baseline": "middle" }, format(value)));
   }
-  for (const i of [0, 3, alertHistoryHours]) {
-    chart.append(svg("text", { x: x(i), y: 123, "text-anchor": i === 0 ? "start" : i === alertHistoryHours ? "end" : "middle" },
-      date(new Date(points[i].time).toISOString())));
+  for (const [time, anchor] of [[start, "start"], [(start + end) / 2, "middle"], [end, "end"]]) {
+    chart.append(svg("text", { x: x(time), y: 142, "text-anchor": anchor }, date(new Date(time).toISOString())));
   }
 
-  const referenceY = y(alert.expected);
-  chart.append(svg("line", { class: "chart-baseline", x1: left, x2: right, y1: referenceY, y2: referenceY }));
-  const path = points.map(({ value }, i) => Number.isFinite(value) ?
-    `${Number.isFinite(points[i - 1]?.value) ? "L" : "M"} ${x(i)} ${y(value)}` : "").join(" ");
-  chart.append(svg("path", { class: "chart-series", d: path }));
-  points.forEach(({ time, value }, i) => {
+  const band = [];
+  let segment = [];
+  for (const point of [...points, {}]) {
+    if ((!Number.isFinite(point.p10) || point.time - segment.at(-1)?.time > cadence) && segment.length) {
+      if (segment.length === 1) {
+        const { time, p10, p90 } = segment[0];
+        const a = Math.max(left, x(time) - 3);
+        const b = Math.min(right, x(time) + 3);
+        band.push(`M ${a} ${y(p90)} H ${b} V ${y(p10)} H ${a} Z`);
+      } else {
+        const upper = segment.map(({ time, p90 }) => `${x(time)} ${y(p90)}`);
+        const lower = [...segment].reverse().map(({ time, p10 }) => `${x(time)} ${y(p10)}`);
+        band.push(`M ${[...upper, ...lower].join(" L ")} Z`);
+      }
+      segment = [];
+    }
+    if (Number.isFinite(point.p10)) segment.push(point);
+  }
+  if (band.length) chart.append(svg("path", { class: "chart-reference-band", d: band.join(" ") }));
+  const line = (key) => points.map((point, i) => {
+    if (!Number.isFinite(point[key])) return "";
+    const previous = points[i - 1];
+    const connected = Number.isFinite(previous?.[key]) && point.time - previous.time <= cadence;
+    return `${connected ? "L" : "M"} ${x(point.time)} ${y(point[key])}`;
+  }).join(" ");
+  const expectedLine = line("expected");
+  const hasAlignedBaseline = aligned && expectedLine.includes("L ");
+  const baseline = hasAlignedBaseline ? expectedLine : `M ${left} ${y(alert.expected)} H ${right}`;
+  chart.append(svg("path", { class: "chart-baseline", d: baseline }),
+    svg("path", { class: "chart-series", d: line("value") }));
+  points.forEach(({ time, value, sample_size, references }, i) => {
     if (!Number.isFinite(value)) return;
-    const ring = i === alertHistoryHours;
-    const point = svg("circle", { class: ring ? "chart-trigger" : "chart-point", cx: x(i), cy: y(value), r: ring ? 4.5 : 2.7 });
-    point.append(svg("title", {}, `${date(new Date(time).toISOString())} UTC · ${format(value)}`));
+    const ring = i === points.length - 1;
+    const point = svg("circle", { class: ring ? "chart-trigger" : "chart-point", cx: x(time), cy: y(value), r: ring ? 4.5 : 2.7 });
+    const sample = Number.isFinite(sample_size) ? ` · n = ${number(sample_size)}` : "";
+    const reference = references ? ` · ${references} reference windows` : "";
+    const evaluation = ring && alert.observedAt ? ` · Evaluated ${date(alert.observedAt)} UTC` : "";
+    point.append(svg("title", {}, `${date(new Date(time).toISOString())} UTC · ${format(value)}${sample}${reference}${evaluation}`));
     chart.append(point);
   });
 
   const legend = element("div", null, "activity-chart-legend");
-  for (const [label, kind] of [["Reading", "series"], ["Baseline used for this alert", "baseline"], ["Alert reading", "trigger"]]) {
+  const keys = [["Observed", "series"], [hasAlignedBaseline ? "Time-aligned baseline" : "Alert baseline", "baseline"], ["Alert reading", "trigger"]];
+  if (band.length) keys.splice(2, 0, ["Historical 10th–90th percentile", "band"]);
+  for (const [label, kind] of keys) {
     const item = element("span", label, "chart-key " + kind);
     legend.append(item);
   }
-  figure.replaceChildren(element("figcaption", "Hourly readings for this scope · UTC"), chart, legend);
+  const caption = alert.observedAt ? "Rolling one-hour readings · every 5 minutes" : "Hourly readings";
+  figure.replaceChildren(element("figcaption", caption + " · window end in UTC"), chart, legend);
 }
 
 function updateActivitySelection() {

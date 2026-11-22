@@ -5,12 +5,13 @@ from datetime import timedelta, timezone
 from math import ceil
 from zoneinfo import ZoneInfo
 
+from eye.intervals import GRACE
 from eye.metric_catalog import OUTCOMES
 from eye.simulator import SOURCES
 
 BERLIN = ZoneInfo("Europe/Berlin")
 MINUTE = timedelta(minutes=1)
-MAX_MATURITY = timedelta(minutes=15)
+MAX_MATURITY = GRACE
 EVENT_COLUMNS = "id, activity, attrs, occurred_at, ingested_at"
 OBJECT_ACTIVITY = {
     "session_started": "session", "product_viewed": "session", "cart_added": "session",
@@ -47,18 +48,23 @@ class Facts:
             cursor = max(cursor, window["end_at"])
         self.covered = cursor >= end
         self.extended = bool(self.windows) and all(w["observation_snapshot"] for w in self.windows)
-        self.manifest = {
-            (row["source_id"], row["event_type"]): row["expected"]
-            for row in db.execute(
-                """select source_id, event_type, sum(expected) as expected from source_manifests
-                   where minute_at >= %s and minute_at < %s group by source_id, event_type""",
-                (start, end),
-            ).fetchall()
-        }
+        self.manifest = Counter()
+        batch_totals = Counter()
+        for row in db.execute(
+            """select window_start, source_id, event_type, sum(expected) as batch_count,
+                      sum(expected) filter (where minute_at >= %s and minute_at < %s) as interval_count
+               from source_manifests where minute_at >= %s and minute_at < %s
+               group by window_start, source_id, event_type""",
+            (start, end, self.windows[0]["start_at"] if self.windows else start,
+             self.windows[-1]["end_at"] if self.windows else end),
+        ).fetchall():
+            batch_totals[row["window_start"]] += row["batch_count"]
+            if row["interval_count"]:
+                self.manifest[row["source_id"], row["event_type"]] += row["interval_count"]
         self.full_windows = all(w["start_at"] >= start and w["end_at"] <= end for w in self.windows)
         self.expected = sum(w["expected_events"] for w in self.windows)
-        self.missing_manifest = (self.extended and self.full_windows and
-                                 sum(self.manifest.values()) != self.expected)
+        self.missing_manifest = self.extended and any(
+            batch_totals[w["start_at"]] != w["expected_events"] for w in self.windows)
         rows = db.execute(
             f"""select {EVENT_COLUMNS} from events
                 where occurred_at >= %s and occurred_at < %s and ingested_at <= %s
@@ -238,10 +244,15 @@ def metric_readings(definition, facts, scope=None):
     }
     groups = {selected: [0, 0, 0, []]}
     quality = "complete"
+    scope_cache = {}
+    dimensions = definition["dimensions"]
 
     def keys(attrs):
         if scope is None:
-            return scopes_for(attrs, definition["dimensions"], access["alert_dimensions"])
+            values = tuple(attrs.get(key) for key in dimensions)
+            if values not in scope_cache:
+                scope_cache[values] = scopes_for(attrs, dimensions, access["alert_dimensions"])
+            return scope_cache[values]
         return (selected,) if matches(attrs, wanted) else ()
 
     def add(attrs, total=0, denominator=0, count=0, delay=None):
@@ -273,7 +284,7 @@ def metric_readings(definition, facts, scope=None):
         for rows in facts.by_activity.values():
             for row in rows:
                 add(row["attrs"], count=1, delay=(row["ingested_at"] - row["occurred_at"]).total_seconds())
-    elif (any(facts.received[key] < count for key, count in facts.manifest.items()) or
+    elif (facts.missing_manifest or any(facts.received[key] < count for key, count in facts.manifest.items()) or
           (facts.full_windows and sum(facts.received.values()) < facts.expected)):
         quality = "incomplete_data"
     else:

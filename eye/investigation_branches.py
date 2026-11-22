@@ -1,12 +1,12 @@
 """Build evidence branches from cohort-aligned telemetry."""
 
 from collections import Counter, defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from statistics import median
 
 from psycopg.types.json import Jsonb
 
-HOUR = timedelta(hours=1)
+from eye.intervals import GRACE, HOUR, aligned_history
 PAYMENT_EVENTS = ("payment_attempted", "payment_succeeded", "payment_timed_out", "payment_declined")
 PAYMENT_CONTEXT = (*PAYMENT_EVENTS, "order_confirmed")
 SALES_EVENTS = ("search_requested", "feed_impression", "order_confirmed", "payment_attempted", "payment_succeeded")
@@ -26,7 +26,19 @@ def traffic_scope(scope, fields=SHOPPER_SCOPE):
     return {key: scope[key] for key in fields if key in scope}
 
 
-def read_events(db, windows, activities, scope, cutoff=None):
+def read_events(db, windows, activities, scope, cutoff=None, *, rolling=False, follow_payment=False):
+    if rolling:
+        return db.execute(
+            """select e.id, e.activity, p.start_at as window_start, e.occurred_at, e.ingested_at, e.attrs
+               from unnest(%s::timestamptz[]) p(start_at) join events e
+                 on e.occurred_at >= p.start_at and e.occurred_at < p.start_at + %s
+                and e.ingested_at <= coalesce(%s, p.start_at + %s)
+               where e.activity = any(%s) and e.attrs @> %s
+                 and (e.activity <> 'payment_attempted' or e.occurred_at < p.start_at + %s)
+               order by e.occurred_at, e.id""",
+            (windows, HOUR + GRACE if follow_payment else HOUR, cutoff, HOUR + GRACE,
+             list(activities), Jsonb(scope), HOUR),
+        ).fetchall()
     return db.execute(
         """select e.id, e.activity, e.window_start, e.occurred_at, e.ingested_at, e.attrs
            from events e join windows w on w.start_at = e.window_start
@@ -101,12 +113,12 @@ def payment_cohort(rows, start=None, at_detection=None):
     return counts, samples
 
 
-def payment_branches(db, start, scope, at_detection, cutoff, history):
+def payment_branches(db, start, scope, at_detection, cutoff, history, *, rolling=False):
     scope = traffic_scope(scope, (*SHOPPER_SCOPE, "payment_provider", "checkout_release_version"))
-    windows = [row["start_at"] for row in db.execute(
+    windows = [start] if rolling else [row["start_at"] for row in db.execute(
         "select start_at from windows where start_at >= %s and start_at <= %s order by start_at", (start, cutoff)
     ).fetchall()]
-    rows = read_events(db, windows, PAYMENT_CONTEXT, scope, cutoff)
+    rows = read_events(db, windows, PAYMENT_CONTEXT, scope, cutoff, rolling=rolling, follow_payment=True)
     # Gateway scope only exists on payment telemetry, so infer the affected cohort
     # from receipts when a broader data-completeness alert was the first signal.
     if not scope:
@@ -129,7 +141,7 @@ def payment_branches(db, start, scope, at_detection, cutoff, history):
     counts, samples = payment_cohort(rows, start, at_detection)
     if not counts["attempts"]:
         return [], False
-    historic, _ = payment_cohort(read_events(db, history, PAYMENT_CONTEXT, scope))
+    historic, _ = payment_cohort(read_events(db, history, PAYMENT_CONTEXT, scope, rolling=rolling, follow_payment=True))
     total = counts["attempts"]
     timeout = counts["initial_timeouts"]
     gateway = counts["initial_gateway_timeouts"]
@@ -262,9 +274,9 @@ def search_cohort(rows):
     return cohorts
 
 
-def sales_branches(db, start, scope, at_detection, history):
+def sales_branches(db, start, scope, at_detection, history, *, rolling=False):
     scope = traffic_scope(scope)
-    cohorts = search_cohort(read_events(db, [start], SALES_EVENTS, scope, at_detection))
+    cohorts = search_cohort(read_events(db, [start], SALES_EVENTS, scope, at_detection, rolling=rolling))
     if not cohorts:
         return []
     rollout, holdout = cohorts.get("rollout"), cohorts.get("holdout")
@@ -275,7 +287,7 @@ def sales_branches(db, start, scope, at_detection, history):
                                unresolved=["No contemporaneous holdout was observed for this traffic cohort."],
                                evidence={"scope": scope, "cohorts": cohorts})]
         return []
-    old = search_cohort(read_events(db, history, SALES_EVENTS, scope)).get("holdout")
+    old = search_cohort(read_events(db, history, SALES_EVENTS, scope, rolling=rolling)).get("holdout")
     faster = rollout["median_response_ms"] < holdout["median_response_ms"]
     different_release = rollout["releases"] != holdout["releases"]
     exposed = rollout["exposed"] / rollout["sessions"]
@@ -357,7 +369,7 @@ def sales_branches(db, start, scope, at_detection, history):
     ]
 
 
-def upstream_branches(db, incident, start, at_detection, history):
+def upstream_branches(db, incident, start, at_detection, history, *, rolling=False):
     """Check discovered predecessors against session-cohort observations."""
     scope = traffic_scope(incident["scope"])
     transition = incident["report"].get("break", {})
@@ -405,8 +417,8 @@ def upstream_branches(db, incident, start, at_detection, history):
         return len(sessions), {key: len(value) for key, value in earlier.items()}, samples
 
     wanted = ["session_started", *anchors, *activities]
-    total, current, samples = summarize(read_events(db, [start], wanted, scope, at_detection))
-    historic, prior, _ = summarize(read_events(db, history, wanted, scope))
+    total, current, samples = summarize(read_events(db, [start], wanted, scope, at_detection, rolling=rolling))
+    historic, prior, _ = summarize(read_events(db, history, wanted, scope, rolling=rolling))
     if total < 20 or historic < 50:
         return [hypothesis("Earlier workflow disruption", unresolved=[
             "Too few linked sessions to compare the detected stage with its discovered predecessors."
@@ -436,20 +448,22 @@ def upstream_branches(db, incident, start, at_detection, history):
 
 def build_branches(db, incident, cutoff, baseline):
     start = incident["opened_at"]
-    at_detection = db.execute(
+    window = incident["report"].get("observation_window")
+    at_detection = datetime.fromisoformat(window["observed_at"]) if window else db.execute(
         "select coalesce(observation_snapshot, end_at) as cutoff from windows where start_at = %s", (start,),
     ).fetchone()["cutoff"]
     cutoff = max(cutoff or at_detection, at_detection)
-    history = baselines(db, start, baseline)
+    history = aligned_history(start, baseline) if window else baselines(db, start, baseline)
     metric = incident["metric_id"]
     branches, watch_receipts = [], False
     event_type = incident["scope"].get("event_type")
     if metric in PAYMENT_SIGNALS and (not event_type or event_type in PAYMENT_EVENTS):
-        branches, watch_receipts = payment_branches(db, start, incident["scope"], at_detection, cutoff, history)
+        branches, watch_receipts = payment_branches(db, start, incident["scope"], at_detection, cutoff, history,
+                                                   rolling=bool(window))
     if metric in SALES_SIGNALS:
-        branches.extend(sales_branches(db, start, incident["scope"], at_detection, history))
+        branches.extend(sales_branches(db, start, incident["scope"], at_detection, history, rolling=bool(window)))
     if not branches:
-        branches.extend(upstream_branches(db, incident, start, at_detection, history))
+        branches.extend(upstream_branches(db, incident, start, at_detection, history, rolling=bool(window)))
     if not branches:
         branches.append(hypothesis("Scope or telemetry changed",
                                    unresolved=["There is insufficient linked event telemetry to compare competing explanations."],

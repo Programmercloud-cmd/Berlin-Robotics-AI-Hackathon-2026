@@ -8,8 +8,9 @@ from random import Random
 
 from psycopg.types.json import Jsonb
 
+from eye.intervals import CADENCE, GRACE, HOUR
+
 DEMO_START = datetime(2026, 11, 21, 9, tzinfo=timezone.utc)
-HOUR = timedelta(hours=1)
 PAYMENT_SCOPE = {"country": "DE", "platform": "mobile", "provider": "Stripe"}
 SEARCH_SCOPE = {"country": "FR", "platform": "web"}
 SEGMENTS = list(product(("DE", "FR"), ("mobile", "web"), ("Stripe", "Adyen")))
@@ -44,7 +45,7 @@ def traffic_cycle(start):
 
 
 def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disruption=False,
-         patterned=False, scenario=None, scenarios=()):
+         patterned=False, scenario=None, scenarios=(), staged=False):
     start = start.astimezone(timezone.utc)
     clock = int(start.timestamp())
     rng = Random(f"{seed}:{clock}")
@@ -248,10 +249,10 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
                   {"sku": sku, "available_units": units, **ALL_PRODUCTS[sku]}, [(sku, "product")])
 
     window = db.execute(
-        """insert into windows (start_at, end_at, expected_events, observation_snapshot)
-           values (%s, %s, %s, %s)
+        """insert into windows (start_at, end_at, expected_events, observation_snapshot, published_through)
+           values (%s, %s, %s, %s, %s)
            on conflict (start_at) do nothing returning start_at""",
-        (start, start + HOUR, len(events), start + HOUR + timedelta(minutes=15)),
+        (start, start + HOUR, len(events), start + HOUR + GRACE, start if staged else None),
     ).fetchone()
     if not window:
         return
@@ -270,3 +271,13 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
         with cursor.copy("copy source_manifests from stdin") as copy:
             for (minute, source, activity), count in manifest.items():
                 copy.write_row((start, minute, source, activity, count))
+
+
+def publication_ticks(start, *, drain=False):
+    horizon = HOUR + (GRACE if drain else timedelta())
+    return (start + tick * CADENCE for tick in range(1, horizon // CADENCE + 1))
+
+
+def publish_through(db, start, cutoff):
+    db.execute("update windows set published_through = greatest(published_through, %s) where start_at = %s",
+               (cutoff, start))

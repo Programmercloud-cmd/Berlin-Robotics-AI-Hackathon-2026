@@ -83,13 +83,15 @@ def make_app(dsn, model=None):
             window = state(db, "last_window")
             if not window:
                 return []
+            cutoff = state(db, "last_observed_at") or db.execute(
+                """select coalesce(observation_snapshot, end_at + interval '15 minutes') as cutoff
+                   from windows where start_at = %s""", (window,),
+            ).fetchone()["cutoff"]
             return db.execute(
                 """select e.id, e.activity, e.occurred_at, e.ingested_at, e.attrs
-                   from events e join windows w on w.start_at = %s
-                   where e.window_start <= w.start_at
-                     and e.ingested_at <= coalesce(w.observation_snapshot, w.end_at + interval '15 minutes')
+                   from events e where e.occurred_at <= %s and e.ingested_at <= %s
                    order by e.occurred_at desc, e.id desc limit 40""",
-                (window,),
+                (cutoff, cutoff),
             ).fetchall()
 
     @app.get("/api/incidents/{incident_id}/evidence")
@@ -158,7 +160,10 @@ def make_app(dsn, model=None):
                     return {"metric_id": metric_id, "readings": []}
                 start = utc(start) if start else latest["start_at"]
                 end = utc(end) if end else latest["end_at"]
-                as_of = utc(as_of) if as_of else latest["observation_snapshot"] or latest["end_at"] + MAX_MATURITY
+                available = latest["published_through"] or latest["observation_snapshot"] or latest["end_at"] + MAX_MATURITY
+                as_of = utc(as_of) if as_of else available
+                if latest["published_through"] is not None:
+                    as_of = min(as_of, available)
                 if start >= end or any(t.second or t.microsecond for t in (start, end)):
                     raise ValueError("Use a positive interval with minute-aligned boundaries.")
                 if (definition["calculation"]["method"] == "budget" and

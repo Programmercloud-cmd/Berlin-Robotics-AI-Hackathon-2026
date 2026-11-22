@@ -92,9 +92,12 @@ def main():
             last += timedelta(hours=1)
             with connect(dsn) as db:
                 simulator.emit(db, last, traffic=args.traffic, fault=args.payment_disruption,
-                               search_disruption=args.search_disruption)
+                               search_disruption=args.search_disruption, staged=True)
+                for cutoff in simulator.publication_ticks(last, drain=emitted + 1 == args.windows):
+                    simulator.publish_through(db, last, cutoff)
+                    db.commit()
+                    sleep(args.delay / 12)
             emitted += 1
-            sleep(args.delay)
     else:
         with connect(dsn) as db:
             setup(db)

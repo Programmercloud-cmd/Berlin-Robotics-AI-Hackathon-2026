@@ -7,6 +7,7 @@ create table if not exists windows (
     expected_events integer not null
 );
 alter table windows add column if not exists observation_snapshot timestamptz;
+alter table windows add column if not exists published_through timestamptz;
 
 create table if not exists events (
     id text primary key,
@@ -55,7 +56,7 @@ create table if not exists metrics (
 
 create table if not exists observations (
     metric_id text not null references metrics(id),
-    window_start timestamptz not null references windows(start_at),
+    window_start timestamptz not null,
     scope jsonb not null,
     value double precision not null,
     sample_size integer not null,
@@ -63,8 +64,11 @@ create table if not exists observations (
 );
 alter table observations alter column value drop not null;
 alter table observations add column if not exists details jsonb not null default '{}';
+-- Observation intervals can start between source batches.
+alter table observations drop constraint if exists observations_window_start_fkey;
 create index if not exists aggregate_observations_recent on observations(metric_id, window_start desc)
     where scope = '{}';
+create index if not exists observations_by_window on observations(window_start);
 
 create table if not exists graph_nodes (
     id text primary key,
@@ -87,7 +91,7 @@ create index if not exists graph_edges_target on graph_edges(target);
 create table if not exists anomalies (
     id bigint generated always as identity primary key,
     metric_id text not null references metrics(id),
-    window_start timestamptz not null references windows(start_at),
+    window_start timestamptz not null,
     scope jsonb not null,
     observed double precision not null,
     expected double precision not null,
@@ -96,6 +100,9 @@ create table if not exists anomalies (
     unique (metric_id, window_start, scope)
 );
 alter table anomalies add column if not exists detected_at timestamptz default clock_timestamp();
+alter table anomalies add column if not exists window_end timestamptz;
+alter table anomalies add column if not exists observed_at timestamptz;
+alter table anomalies drop constraint if exists anomalies_window_start_fkey;
 
 create table if not exists incidents (
     id bigint generated always as identity primary key,
@@ -119,11 +126,12 @@ create table if not exists pending_reports (
 create table if not exists evidence (
     id bigint generated always as identity primary key,
     incident_id bigint not null references incidents(id),
-    window_start timestamptz not null references windows(start_at),
+    window_start timestamptz not null,
     kind text not null,
     node_id text references graph_nodes(id),
     payload jsonb not null
 );
+alter table evidence drop constraint if exists evidence_window_start_fkey;
 
 create table if not exists runtime (
     key text primary key,

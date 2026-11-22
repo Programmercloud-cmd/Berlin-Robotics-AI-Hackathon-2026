@@ -3,18 +3,18 @@
 import json
 import logging
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime
 from statistics import fmean
 
 from psycopg.types.json import Jsonb
 
 from eye.db import connect, state
+from eye.intervals import CADENCE, HOUR, aligned_history
 from eye.investigation_branches import build_branches
 from eye.model import ask
 from eye.observation import observation_tool
 from eye.transitions import ALERT_STEPS, BY_ID, POSITIONS, WORKFLOW, Readings, compatible
 
-HOUR = timedelta(hours=1)
 log = logging.getLogger(__name__)
 PRIORITY = {
     "measures": 0, "calculated_from": 1, "precedes": 2, "depends_on": 3,
@@ -50,11 +50,10 @@ def add_evidence(db, incident_id, start, kind, payload, node_id=None):
 
 
 def reference(tool, metric_id, start, scope, baseline):
-    historic = tool("metric_readings", metric_id=metric_id, start=baseline - timedelta(days=5),
-                    end=baseline + HOUR, scope=scope)
-    historic = [row for row in historic if row["value"] is not None]
-    hourly = [row for row in historic if datetime.fromisoformat(row["window_start"]).hour == start.hour]
-    periods = hourly or historic
+    dates = aligned_history(start, baseline)
+    historic = tool("metric_readings", metric_id=metric_id, start=dates[-1],
+                    end=dates[0] + CADENCE, scope=scope, aligned_to=start)
+    periods = [row for row in historic if row["value"] is not None]
     if periods and all(row["details"].get("denominator") for row in periods):
         return (sum(row["details"]["numerator"] for row in periods) /
                 sum(row["details"]["denominator"] for row in periods))
@@ -66,7 +65,7 @@ def signal(tool, metric_id, start, scope, baseline):
     if not definition:
         return None
     scope = {key: value for key, value in scope.items() if key in definition["dimensions"]}
-    readings = tool("metric_readings", metric_id=metric_id, start=start, end=start + HOUR, scope=scope)
+    readings = tool("metric_readings", metric_id=metric_id, start=start, end=start + CADENCE, scope=scope)
     if not readings or readings[-1]["value"] is None:
         return None
     observed = readings[-1]["value"]
@@ -78,20 +77,20 @@ def signal(tool, metric_id, start, scope, baseline):
     }
 
 
-def transition_evidence(db, tool, incident, start, completion, samples):
+def transition_evidence(db, tool, incident, start, completion, samples, as_of):
     step = BY_ID[completion["id"]]
     add_evidence(db, incident, start, "first observable break", completion, metric_node(step.metric))
     if not step.failure:
         return None
     breakdown = completion["scope"]
     failures = tool("supporting_events", window_start=start, scope=breakdown,
-                    activities=[step.failure], limit=3)
+                    activities=[step.failure], limit=3, as_of=as_of)
     if not failures:
         return None
     example = failures[0]
     identity = example["attrs"].get(step.identity)
     requests = tool("supporting_events", window_start=start, scope={**breakdown, step.identity: identity},
-                    activities=[step.entry], limit=1) if identity else []
+                    activities=[step.entry], limit=1, as_of=as_of) if identity else []
     for activity, rows in ((step.entry, requests), (step.failure, failures)):
         if rows:
             node = f"activity:{activity}"
@@ -106,6 +105,7 @@ def transition_evidence(db, tool, incident, start, completion, samples):
 
 def collect_evidence(db, tool, anomaly, incident, baseline, completion=None):
     start, scope = anomaly["window_start"], anomaly["scope"]
+    as_of = anomaly.get("observed_at")
     root = metric_node(anomaly["metric_id"])
     if "id" in anomaly:
         add_evidence(db, incident, start, "anomaly", anomaly, root)
@@ -113,7 +113,7 @@ def collect_evidence(db, tool, anomaly, incident, baseline, completion=None):
     comparisons = [row for row in breakdown if row["scope"].keys() == scope.keys()]
     comparisons = sorted(comparisons, key=lambda row: -row["sample_size"])[:12]
     add_evidence(db, incident, start, "segment comparison", comparisons, root)
-    window_context = tool("company_context", window_start=start)
+    window_context = tool("company_context", window_start=start, as_of=as_of)
     add_evidence(db, incident, start, "window context", window_context)
 
     queue = deque([(root, 0, None)])
@@ -134,7 +134,7 @@ def collect_evidence(db, tool, anomaly, incident, baseline, completion=None):
                 add_evidence(db, incident, start, "metric comparison", reading, node_id)
         if node["kind"] == "activity" and len(samples) < 8:
             rows = tool("supporting_events", window_start=start, scope=scope,
-                        activities=[node["properties"]["activity"]], limit=3)
+                        activities=[node["properties"]["activity"]], limit=3, as_of=as_of)
             if rows:
                 samples.append({"node": node_id, "events": rows})
                 add_evidence(db, incident, start, "observed events", rows, node_id)
@@ -163,7 +163,7 @@ def collect_evidence(db, tool, anomaly, incident, baseline, completion=None):
         is_rate = True
         first_break = (f"{completion['completed']} of {completion['eligible']} eligible attempts completed "
                        f"({observed:.1%} versus {expected:.1%} expected).")
-        transition_failure = transition_evidence(db, tool, incident, start, completion, samples)
+        transition_failure = transition_evidence(db, tool, incident, start, completion, samples, as_of)
     estimate = abs(expected - observed)
     if is_rate:
         size = completion["eligible"] if completion else anomaly["sample_size"]
@@ -277,7 +277,8 @@ def finish_next_branch(dsn, stop):
         latest = state(db, "last_window")
         if not baseline or not latest:
             return False
-        cutoff = db.execute(
+        observed = state(db, "last_observed_at")
+        cutoff = datetime.fromisoformat(observed) if observed else db.execute(
             "select coalesce(observation_snapshot, end_at) as cutoff from windows where start_at = %s",
             (datetime.fromisoformat(latest),),
         ).fetchone()["cutoff"]
@@ -321,11 +322,17 @@ def watch_branches(dsn, stop, poll=0.5):
         stop.wait(poll)
 
 
-def update_recovery(db, incident, start, reading, healthy, node):
-    streak = incident["healthy_windows"] + 1 if healthy else 0
-    recovered = start if streak >= 2 else None
-    recovery = ({"recovery": "The affected rate or metric returned to its baseline range for two observed windows."}
-                if recovered else {})
+def update_recovery(db, incident, start, reading, healthy, node, observed_at=None):
+    cadence = CADENCE if observed_at else HOUR
+    required = HOUR // CADENCE if observed_at else 2
+    previous = incident["healthy_windows"] if incident["updated_at"] + cadence == start else 0
+    streak = previous + 1 if healthy else 0
+    recovered = start if streak >= required else None
+    recovery = {}
+    if recovered:
+        recovery["recovery"] = f"The affected rate or metric returned to its baseline range for {required} consecutive evaluations."
+        if observed_at:
+            recovery["recovery_observed_at"] = observed_at
     if reading:
         add_evidence(db, incident["id"], start, "recovery observation", reading, node)
     db.execute(
@@ -347,9 +354,12 @@ def workflow_groups(readings, open_incidents, alerts):
         if not relevant:
             continue
         chosen = [group["completion"] for group in groups
-                  if group["completion"]["id"] == step.id and group["completion"]["status"] != "steady"]
+                  if group["completion"]["id"] == step.id]
         for completion in readings.degraded(step):
-            if (not any(compatible(row["scope"], completion["scope"]) for row in relevant)
+            scope = completion["scope"]
+            # An alert on an intersecting aggregate does not corroborate a break in an unrelated segment.
+            if (not any(compatible(row["scope"], scope) and (not scope or scope.keys() & row["scope"].keys())
+                        for row in relevant)
                     or any(compatible(row["scope"], completion["scope"]) for row in chosen)):
                 continue
             groups.append({"incident": None, "completion": completion, "alerts": []})
@@ -361,16 +371,17 @@ def assign_workflow_alerts(readings, groups, alerts):
     remaining = []
     for row in alerts:
         stage = ALERT_STEPS.get(row["metric_id"], -1)
-        candidates = [group for group in groups if group["completion"]["status"] == "degraded"
+        candidates = [group for group in groups if (group["completion"]["status"] == "degraded" or group.get("incident"))
                       and POSITIONS[group["completion"]["id"]] <= stage
                       and compatible(group["completion"]["scope"], row["scope"])]
         if not candidates:
             remaining.append(row)
             continue
-        # A local rate fault takes precedence over compatible upstream volume losses.
+        # Attribute the signal to its matching cohort before comparing candidate steps.
         best = max(candidates, key=lambda group: (
-            POSITIONS[group["completion"]["id"]],
+            group["completion"]["status"] == "degraded",
             sum(row["scope"].get(key) == value for key, value in group["completion"]["scope"].items()),
+            POSITIONS[group["completion"]["id"]],
             group["completion"]["strength"],
         ))
         anchor = best["completion"]
@@ -406,6 +417,8 @@ def open_incident(db, tool, start, baseline, anchor, alerts, model, completion=N
         report["measurement"] = {"observed": anchor["observed"], "expected": anchor["expected"],
                                  "unit": metric["access"].get("unit", "count")}
     report["deep_investigation"] = "pending"
+    if anchor.get("observed_at"):
+        report["observation_window"] = {key: anchor[key] for key in ("window_start", "window_end", "observed_at")}
     db.execute("update incidents set report = %s where id = %s", (jsonb(report), incident_id))
     attach_alerts(db, incident_id, start, [row for row in alerts if row["id"] != anchor.get("id")],
                   "related anomaly")
@@ -425,7 +438,7 @@ def attach_alerts(db, incident_id, start, alerts, kind):
                    (jsonb({"uncertain_relationships": list(uncertain.values())}), incident_id))
 
 
-def track_other(db, tool, start, baseline, incidents, alerts, model, good_data):
+def track_other(db, tool, start, baseline, incidents, alerts, model, good_data, observed_at):
     for incident in incidents:
         same = [row for row in alerts if row["metric_id"] == incident["metric_id"]
                 and compatible(row["scope"], incident["scope"])]
@@ -433,16 +446,16 @@ def track_other(db, tool, start, baseline, incidents, alerts, model, good_data):
             attach_alerts(db, incident["id"], start, same, "ongoing anomaly")
             for row in same:
                 alerts.remove(row)
-            update_recovery(db, incident, start, None, False, None)
+            update_recovery(db, incident, start, None, False, None, observed_at)
             continue
         current = tool("metric_readings", metric_id=incident["metric_id"], start=start,
-                       end=start + HOUR, scope=incident["scope"])
+                       end=start + CADENCE, scope=incident["scope"])
         metric = tool("metric_definition", metric_id=incident["metric_id"])
         ratio = metric["calculation"]["op"] in {"ratio", "share"} or metric["access"].get("unit") == "ratio"
         reading = current[-1] if current else None
         healthy = (good_data and reading and reading["value"] is not None
                    and (not ratio or reading["sample_size"] >= 30))
-        update_recovery(db, incident, start, reading, healthy, metric_node(incident["metric_id"]))
+        update_recovery(db, incident, start, reading, healthy, metric_node(incident["metric_id"]), observed_at)
 
     while alerts:
         # Keep independent signals when there is no measured workflow break to explain them.
@@ -454,38 +467,57 @@ def track_other(db, tool, start, baseline, incidents, alerts, model, good_data):
         open_incident(db, tool, start, baseline, anchor, cohort, model)
 
 
-def track(db, start, anomalies, model=None):
+def track(db, start, anomalies, model=None, *, history=None, facts=None, observed_at=None):
     open_incidents = db.execute("select * from incidents where recovered_at is null order by id").fetchall()
     if not anomalies and not open_incidents:
         return
     baseline = datetime.fromisoformat(state(db, "baseline_through"))
     tool = observation_tool(db)
-    health = tool("metric_readings", metric_id="data_completeness_ratio", start=start, end=start + HOUR)
+    health = tool("metric_readings", metric_id="data_completeness_ratio", start=start, end=start + CADENCE)
     good_data = not health or (health[-1]["value"] is not None and health[-1]["value"] >= 0.97)
     remaining = list(anomalies)
     accounted = set()
     if any(row["metric_id"] in ALERT_STEPS for row in anomalies) or any(
             incident["report"].get("break", {}).get("id") in BY_ID for incident in open_incidents):
-        readings = Readings(db, start, baseline)
+        if history is not None:
+            discarded = {row["window_start"] for row in db.execute(
+                """select window_start from observations where metric_id = 'data_completeness_ratio'
+                   and scope = '{}' and window_start = any(%s)
+                   and (details->>'quality' = 'missing_window' or value < 0.97)""", (history,),
+            ).fetchall()}
+            history = [date for date in history if date not in discarded]
+        readings = Readings(db, start, baseline, history, facts)
         groups = workflow_groups(readings, open_incidents, anomalies if good_data else [])
         remaining = assign_workflow_alerts(readings, groups, remaining)
         for group in groups:
             completion, attached = group["completion"], group["alerts"]
             step = BY_ID[completion["id"]]
             incident = group["incident"]
+            if not incident and not attached:
+                continue
+            if incident is None:
+                # A prior breach can appear before there is enough cohort evidence to locate its step.
+                incident = next((item for item in open_incidents if item["id"] not in accounted
+                                 and item["metric_id"] == step.metric and item["scope"] == completion["scope"]), None)
+                if incident:
+                    db.execute("update incidents set report = report || %s where id = %s",
+                               (jsonb({"break": completion}), incident["id"]))
+                    add_evidence(db, incident["id"], start, "first observable break", completion, metric_node(step.metric))
             if incident:
                 accounted.add(incident["id"])
                 attach_alerts(db, incident["id"], start, attached, "ongoing anomaly")
                 update_recovery(db, incident, start, completion,
-                                good_data and completion["status"] == "steady", metric_node(step.metric))
+                                good_data and completion["status"] == "steady" and not attached,
+                                metric_node(step.metric), observed_at)
             else:
                 anchor = next((row for row in attached if row["metric_id"] == step.metric
                                and row["scope"] == completion["scope"]), None)
                 if not anchor:
                     anchor = {"metric_id": step.metric, "window_start": start, "scope": completion["scope"],
                               "observed": completion["observed"], "expected": completion["expected"],
-                              "sample_size": completion["eligible"]}
+                              "sample_size": completion["eligible"], "window_end": start + HOUR,
+                              "observed_at": observed_at}
                 open_incident(db, tool, start, baseline, anchor, attached, model, completion)
 
     others = [incident for incident in open_incidents if incident["id"] not in accounted]
-    track_other(db, tool, start, baseline, others, remaining, model, good_data)
+    track_other(db, tool, start, baseline, others, remaining, model, good_data, observed_at)

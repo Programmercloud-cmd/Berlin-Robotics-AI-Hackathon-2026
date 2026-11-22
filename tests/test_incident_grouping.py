@@ -71,6 +71,8 @@ class IncidentGroupingTest(unittest.TestCase):
                     with connect(dsn) as db:
                         simulator.emit(db, start, patterned=True, scenarios=effects)
                     self.assertTrue(runtime.step(dsn))
+                    while runtime.step(dsn):
+                        pass
                     if hour not in (0, 2, 3, 5, 7):
                         continue
                     with connect(dsn) as db:
@@ -91,18 +93,21 @@ class IncidentGroupingTest(unittest.TestCase):
                                                 and row["payload"].get("relationship") == "downstream volume"
                                                 for row in rows if isinstance(row["payload"], dict)))
                         elif hour == 3:
-                            self.assertEqual(len(incidents), 2)
+                            self.assertEqual(len(incidents), 2, [(row["metric_id"], row["scope"]) for row in incidents])
                             self.assertEqual(set(steps), {"cart_add", "payment"})
+                            baseline = datetime.fromisoformat(state(db, "baseline_through"))
+                            readings = Readings(db, start, baseline)
                             for incident in incidents:
                                 self.assertEqual(incident["scope"], SCOPE)
-                                self.assertLess(incident["report"]["break"]["observed"],
-                                                incident["report"]["break"]["expected"] - .3)
+                                reading = readings.get(BY_ID[incident["report"]["break"]["id"]], SCOPE)
+                                self.assertLess(reading["observed"], reading["expected"] - .3)
                         elif hour == 5:
                             self.assertEqual(set(steps), {"cart_add"})
                             recovered = db.execute(
                                 "select recovered_at from incidents where metric_id = 'payment_success_rate'"
                             ).fetchone()
-                            self.assertEqual(recovered["recovered_at"], start)
+                            self.assertGreater(recovered["recovered_at"], first + 3 * simulator.HOUR)
+                            self.assertLessEqual(recovered["recovered_at"], start)
                         else:
                             self.assertFalse(incidents)
             finally:

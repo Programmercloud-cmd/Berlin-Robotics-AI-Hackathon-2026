@@ -36,7 +36,7 @@ def attach_measures(db, metric_id, calculation, nodes):
                      {"activity": activity})
 
 
-def discover(db, through=None):
+def discover(db, through=None, cutoff=None):
     import pandas as pd
     import pm4py
     from pm4py.objects.ocel.obj import OCEL
@@ -51,11 +51,13 @@ def discover(db, through=None):
     if not windows:
         return
     starts = [row["start_at"] for row in windows]
-    as_of = windows[0]["as_of"]
+    as_of = cutoff or windows[0]["as_of"]
+    occurrence_limit = through if cutoff else as_of
     events = db.execute(
         """select id as "ocel:eid", activity as "ocel:activity", occurred_at as "ocel:timestamp"
-        from events where window_start = any(%s) and ingested_at <= %s order by occurred_at, id""",
-        (starts, as_of),
+        from events where window_start = any(%s) and ingested_at <= %s and occurred_at < %s
+        order by occurred_at, id""",
+        (starts, as_of, occurrence_limit),
     ).fetchall()
     if not events:
         return
@@ -65,9 +67,9 @@ def discover(db, through=None):
         eo.qualifier as "ocel:qualifier"
         from events e join event_objects eo on eo.event_id = e.id
         join objects o on eo.object_id = o.id
-        where e.window_start = any(%s) and e.ingested_at <= %s
+        where e.window_start = any(%s) and e.ingested_at <= %s and e.occurred_at < %s
         order by e.occurred_at, e.id, o.id, eo.qualifier""",
-        (starts, as_of),
+        (starts, as_of, occurrence_limit),
     ).fetchall()
     if not relations:
         return
@@ -123,6 +125,7 @@ def associate(db):
         """select a.metric_id as source, b.metric_id as target,
                   corr(a.value, b.value) as correlation, count(*) as windows
         from observations a join observations b using (window_start, scope)
+        join windows w on w.start_at = a.window_start
         where a.metric_id < b.metric_id and a.scope = '{}'
         and exists (
             select 1 from graph_edges x join graph_edges y on x.target = y.target

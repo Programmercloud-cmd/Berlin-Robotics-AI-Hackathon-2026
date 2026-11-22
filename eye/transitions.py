@@ -6,6 +6,7 @@ from math import sqrt
 
 from scipy.stats import binom
 
+from eye.intervals import GRACE, HOUR
 
 @dataclass(frozen=True)
 class Transition:
@@ -60,41 +61,75 @@ def scopes(segment, dimensions):
 
 
 class Readings:
-    def __init__(self, db, start, baseline):
-        historic = db.execute(
-            """select start_at from windows where start_at <= %s
-               order by (extract(hour from start_at) = extract(hour from %s::timestamptz)) desc,
-                        start_at desc limit 4""",
-            (baseline, start),
-        ).fetchall()
-        self.historic = [row["start_at"] for row in historic]
+    def __init__(self, db, start, baseline, history=None, facts=None):
         activities = {name for step in WORKFLOW for name in (step.entry, step.outcome, step.previous_entry) if name}
+        following = defaultdict(lambda: defaultdict(list))
         windows = defaultdict(lambda: defaultdict(list))
-        for row in db.execute(
-            """select e.window_start, e.activity, e.attrs
-               from events e join windows w on w.start_at = e.window_start
-               where e.window_start = any(%s) and e.activity = any(%s)
-                 and (w.observation_snapshot is null or e.ingested_at <= w.observation_snapshot)""",
-            ([start, *self.historic], sorted(activities)),
-        ).fetchall():
-            windows[row["window_start"]][row["activity"]].append(row["attrs"])
+        if history is not None:
+            self.historic = history
+            facts = facts or {}
+            dates = [start, *history]
+            for beginning in dates:
+                if beginning not in facts:
+                    continue
+                for activity in activities:
+                    windows[beginning][activity] = [row["attrs"] for row in facts[beginning].by_activity[activity]]
+                    following[beginning][activity] = [row["attrs"] for row in facts[beginning].following[activity]]
+            missing = [beginning for beginning in dates if beginning not in facts]
+            rows = []
+            if missing:
+                rows = db.execute(
+                    """select p.start_at as window_start, e.occurred_at, e.activity, e.attrs
+                       from unnest(%s::timestamptz[]) p(start_at) join events e
+                         on e.occurred_at >= p.start_at and e.occurred_at < p.start_at + %s
+                        and e.ingested_at <= p.start_at + %s
+                       where e.activity = any(%s)""",
+                    (missing, HOUR + GRACE, HOUR + GRACE, sorted(activities)),
+                ).fetchall()
+            for row in rows:
+                window = row["window_start"]
+                following[window][row["activity"]].append(row["attrs"])
+                if row["occurred_at"] < window + HOUR:
+                    windows[window][row["activity"]].append(row["attrs"])
+        else:
+            self.historic = self.legacy_windows(db, start, baseline, activities, windows)
+            following = windows
         self.data = {}
         for step in WORKFLOW:
             # Compare like populations when a database predates request telemetry.
             entry = step.entry
             if step.previous_entry and not any(windows[window][entry] for window in self.historic):
                 entry = step.previous_entry
-            current = self.counts(windows[start], step, entry)
-            history = defaultdict(lambda: [0, 0])
+            current = self.counts(windows[start], step, entry, following[start])
+            history_counts = defaultdict(lambda: [0, 0])
             for window in self.historic:
-                for key, (completed, eligible) in self.counts(windows[window], step, entry).items():
-                    history[key][0] += completed
-                    history[key][1] += eligible
-            self.data[step.id] = (entry, current, history)
+                for key, (completed, eligible) in self.counts(windows[window], step, entry, following[window]).items():
+                    history_counts[key][0] += completed
+                    history_counts[key][1] += eligible
+            self.data[step.id] = (entry, current, history_counts)
 
     @staticmethod
-    def counts(events, step, entry):
-        completed = {row[step.identity] for row in events[step.outcome] if row.get(step.identity)}
+    def legacy_windows(db, start, baseline, activities, windows):
+        historic = db.execute(
+            """select start_at from windows where start_at <= %s
+               order by (extract(hour from start_at) = extract(hour from %s::timestamptz)) desc,
+                        start_at desc limit 4""",
+            (baseline, start),
+        ).fetchall()
+        dates = [row["start_at"] for row in historic]
+        for row in db.execute(
+            """select e.window_start, e.activity, e.attrs
+               from events e join windows w on w.start_at = e.window_start
+               where e.window_start = any(%s) and e.activity = any(%s)
+                 and (w.observation_snapshot is null or e.ingested_at <= w.observation_snapshot)""",
+            ([start, *dates], sorted(activities)),
+        ).fetchall():
+            windows[row["window_start"]][row["activity"]].append(row["attrs"])
+        return dates
+
+    @staticmethod
+    def counts(events, step, entry, following):
+        completed = {row[step.identity] for row in following[step.outcome] if row.get(step.identity)}
         eligible = {row[step.identity]: row for row in events[entry] if row.get(step.identity)}
         result = defaultdict(lambda: [0, 0])
         for identifier, row in eligible.items():

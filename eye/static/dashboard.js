@@ -4,6 +4,10 @@ const dateFormat = new Intl.DateTimeFormat("en-GB", {
 });
 const numberFormat = new Intl.NumberFormat("en-GB", { maximumFractionDigits: 3 });
 const date = (value) => value && Number.isFinite(Date.parse(value)) ? dateFormat.format(new Date(value)) : "—";
+const alertWindowEnd = (start, end) => end || (Number.isFinite(Date.parse(start))
+  ? new Date(Date.parse(start) + 3600000).toISOString() : null);
+const alertWindow = (start, end) => date(start) + " – " + date(alertWindowEnd(start, end)) + " UTC";
+const incidentOpenedAt = (incident) => incident.report?.observation_window?.observed_at || incident.opened_at;
 const number = (value) => value == null ? "—" : numberFormat.format(value);
 const percent = new Intl.NumberFormat("en-GB", { style: "percent", maximumFractionDigits: 1 });
 const words = (value) => String(value ?? "").replaceAll("_", " ");
@@ -404,7 +408,7 @@ function renderIncidentRow(row, incident) {
   const completion = incident.report?.break;
   const measurement = completion || incident.report?.measurement;
   const step = incidentStep(incident);
-  const affected = scope(incident.report?.affected_scope || incident.scope) + " · " + date(incident.opened_at) + " UTC";
+  const affected = scope(incident.report?.affected_scope || incident.scope) + " · " + date(incidentOpenedAt(incident)) + " UTC";
   const recovery = incidentRecoveryStatus(incident);
   const comparison = measurement ? compareReading(measurement, completion ? "ratio" : measurement.unit) : "";
   const summary = [step, affected, recovery, comparison, incident.investigation_pending];
@@ -527,7 +531,7 @@ function renderReport(target, incident) {
   target.replaceChildren();
   const report = incident.report || {};
   const heading = element("div", null, "report-heading");
-  heading.append(element("h3", "Incident " + incident.id), element("span", date(incident.opened_at) + " UTC", "panel-meta"));
+  heading.append(element("h3", "Incident " + incident.id), element("span", date(incidentOpenedAt(incident)) + " UTC", "panel-meta"));
   target.append(heading, element("p", describe(report.summary || "Collecting evidence.")));
   if (incident.investigation_pending) {
     const pending = element("p", "Investigation pending", "panel-meta");
@@ -542,8 +546,8 @@ function renderReport(target, incident) {
     reportSection(target, "Uncertain downstream relationships",
       "Too little evidence to attribute these changes: " + report.uncertain_relationships.join(", ") + ".");
   }
-  const recovery = incident.recovered_at ? "Recovered " + date(incident.recovered_at) + " UTC."
-    : "Tracking recovery · " + incident.healthy_windows + " healthy windows observed.";
+  const recovery = incident.recovered_at ? "Recovered " + date(report.recovery_observed_at || incident.recovered_at) + " UTC."
+    : "Tracking recovery · " + incident.healthy_windows + " healthy evaluations observed.";
   reportSection(target, "Recovery", report.recovery ? recovery + " " + describe(report.recovery) : recovery);
   renderEvidenceBranches(target, report, openBranches);
   const path = report.break?.metrics?.map((id) => "metric:" + id) || [];
@@ -636,7 +640,7 @@ async function loadRelatedAlerts(id, target) {
       const unit = catalog.find((item) => item.id === alert.metric_id)?.access.unit;
       const relationship = alert.kind === "anomaly" ? "Initial alert" : alert.relationship;
       const score = alert.score == null ? null : "score " + number(alert.score);
-      const context = [date(alert.window_start) + " UTC", score, relationship].filter(Boolean).join(" · ");
+      const context = [alertWindow(alert.window_start, alert.window_end), score, relationship].filter(Boolean).join(" · ");
       const item = element("li");
       item.append(button, element("span", scope(alert.scope)),
         element("span", compareReading(alert, unit), "incident-comparison"), element("span", context));

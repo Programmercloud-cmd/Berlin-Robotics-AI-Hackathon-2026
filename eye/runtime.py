@@ -7,6 +7,7 @@ from psycopg.types.json import Jsonb
 
 from eye import curation, graph, investigation, monitor
 from eye.db import connect, set_state, setup, state
+from eye.intervals import CADENCE, GRACE, HOUR
 from eye.metric_catalog import CATALOG, INITIAL_METRICS, LEGACY, STAGED
 
 log = logging.getLogger(__name__)
@@ -68,43 +69,46 @@ def enrich_registered_metric(dsn, metric, model):
 
 def step(dsn, model=None):
     with connect(dsn) as db:
+        if not db.execute("select pg_try_advisory_xact_lock(hashtext('eye.monitor')) as claimed").fetchone()["claimed"]:
+            return False
         baseline = state(db, "baseline_through")
         if baseline is None:
             return False
-        window = db.execute(
-            "select start_at from windows where start_at > %s order by start_at limit 1",
-            (datetime.fromisoformat(state(db, "last_window")),),
-        ).fetchone()
-        if window is None:
+        published = db.execute(
+            """select max(coalesce(published_through, observation_snapshot,
+                                   end_at + interval '15 minutes')) as cutoff from windows"""
+        ).fetchone()["cutoff"]
+        start = datetime.fromisoformat(state(db, "last_window")) + CADENCE
+        end = start + HOUR
+        observed_at = end + GRACE
+        if published is None or observed_at > published:
             return False
-        start = window["start_at"]
         new_types = db.execute("""
             select exists (
                 select 1 from events e
-                join windows w on w.start_at = e.window_start
                 join event_objects eo on eo.event_id = e.id
                 join objects o on o.id = eo.object_id
-                where e.window_start = %s
-                  and e.ingested_at <= coalesce(w.observation_snapshot, w.end_at + interval '15 minutes')
+                where e.occurred_at >= %s and e.occurred_at < %s and e.ingested_at <= %s
                   and (
                     not exists (select 1 from graph_nodes where id = 'activity:' || e.activity)
                     or not exists (select 1 from graph_nodes where id = 'process:' || o.type)
                 )
             ) as value
-            """, (start,)).fetchone()["value"]
+            """, (start, end, observed_at)).fetchone()["value"]
         discover = new_types or (
             start - datetime.fromisoformat(state(db, "last_discovery"))
         ).total_seconds() >= 43200
         if discover:
-            graph.discover(db, through=start)
+            graph.discover(db, through=end, cutoff=observed_at)
             set_state(db, "last_discovery", start.isoformat())
-        monitor.materialize(db, window_start=start)
+        dates, facts = monitor.materialize_rolling(db, start, datetime.fromisoformat(baseline))
         if discover:
             graph.associate(db)
-        anomalies = monitor.detect(db, start, datetime.fromisoformat(baseline))
-        investigation.track(db, start, anomalies, model)
+        anomalies = monitor.detect(db, start, dates, observed_at)
+        investigation.track(db, start, anomalies, model, history=dates, facts=facts, observed_at=observed_at)
         set_state(db, "last_window", start.isoformat())
-        log.info("Observed %s · %d anomalies", start, len(anomalies))
+        set_state(db, "last_observed_at", observed_at.isoformat())
+        log.info("Observed %s–%s UTC · %d anomalies", start.strftime("%H:%M"), end.strftime("%H:%M"), len(anomalies))
         return True
 
 

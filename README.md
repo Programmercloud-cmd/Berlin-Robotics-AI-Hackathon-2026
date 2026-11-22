@@ -25,15 +25,21 @@ Eye’s **Metric catalog** lists all 36 definitions, their data sources, units, 
 
 The original `product_views` and `cart_additions` map to distinct session-cohort counts. Payment attempts count finalized outcomes, with `payment_provider` as the catalog dimension. Search, feed, orders, inventory, advertising, and ingestion use their own populations and source metadata. The source of truth is [the 36-metric catalog on `plan/jacob`](https://github.com/Programmercloud-cmd/Berlin-Robotics-AI-Hackathon-2026/blob/plan/jacob/docs/metrics.md).
 
-`GET /api/catalog/{metric_id}/readings` defaults to five-minute buckets. Pass `start`, `end`, `bucket_minutes`, an optional JSON `scope`, and an optional `as_of` timestamp to recompute from facts. Readings include units, dimensions, population, maturity, quality, and numerator and denominator where applicable. The simulator publishes closed hourly windows with minute source manifests, and the monitor uses hourly alerting. Budget utilization uses campaign budgets and spend from one Europe/Berlin business day per request.
+`GET /api/catalog/{metric_id}/readings` defaults to five-minute buckets. Pass `start`, `end`, `bucket_minutes`, an optional JSON `scope`, and an optional `as_of` timestamp to recompute from facts. Readings include units, dimensions, population, maturity, quality, and numerator and denominator where applicable. Eye evaluates a trailing 60-minute window every five virtual minutes after the 15-minute ingestion grace period. Baselines use comparable UTC hour and minute windows for the same scope, with rates calculated from pooled numerators and denominators. Budget utilization uses campaign budgets and spend from one Europe/Berlin business day per request.
 
 ## Run a scenario
 
 1. Set `DEVIN_API_KEY` and `DEVIN_ORG_ID` in the repo-root `.env` for chat. Try “Frankfurt product pages fail to load” or “people struggle to add products to their cart.” Devin can map both premises to the same **Fewer successful completions** effect at different workflow transitions. Other premises can model gateway timeouts, delayed payment success receipts, or a faster search rollout with a holdout.
 2. Review the transition, affected traffic, severity, and duration. Unspecified scope is marketplace-wide. For completion loss, severity is the fraction of otherwise successful attempts that the simulator prevents from completing. Click **Apply to upcoming windows** when the preview is ready.
-3. Read **Run timeline** for the applied plan, scenario start and end, Eye’s first alert and scope, and recorded recovery. Follow the incident link for the evidence and diagnosis. The alert’s virtual timestamp is the end of its observation window. Real latency measures from the start of publishing the scenario to the persisted alert. Each scenario publishes four healthy hours afterward.
+3. Read **Run timeline** for the applied plan, scenario start and end, Eye’s first alert and scope, and recorded recovery. Follow the incident link for the evidence and diagnosis. Alert details show both window bounds and the virtual evaluation time after the ingestion grace period. Real latency measures from the start of publishing the scenario to the persisted alert. Each scenario publishes four healthy hours afterward.
 
 Use **Generate traffic** to publish normal hours while Devin is preparing a plan. Normal traffic follows a repeating 28-day volume pattern with seeded variation. Every generated window advances the virtual clock and uses fresh event IDs. Select **Review replay** to preview a previous plan, or use **Download JSON** and **Review saved scenario** to preview it in a later lab session. Applying the preview uses the next virtual windows.
+
+For the rolling detection replay, use a fresh seed-42 lab and import the following plan, then apply the preview.
+
+```json
+{"effect":"payment_timeout","transition":"payment","scope":{"country":"DE","platform":"mobile","provider":"Stripe"},"severity":0.85,"duration_hours":2}
+```
 
 The simulator map outlines a draft’s affected branch with dashes and uses a solid outline during the active scenario windows. Use **Show on map** in the run timeline to inspect an earlier run. The map counts outcomes within the selected scenario’s scope and affected windows, and the receipt lane updates as later windows publish.
 
@@ -41,7 +47,7 @@ The workflow diagram, scenario premises, and controls stay in the test lab. Eye 
 
 On Eye’s dashboard, **Graph** shows the observed workflow and **Table** opens the metric catalog. The eye menu includes **Journey**, which arranges the shopping path from left to right with search, recommendations, and receipt delivery in separate lanes. Selecting an incident highlights its observed evidence connections in plum and shows the scope above the graph. Use **Clear selection** to restore the full contrast. All three local views use the Bright and Dark palettes from `AI_Chronicle_UI`, and the header toggle follows you between views on the same host.
 
-Each incident card shows the first measured workflow break, scope, completion rate versus baseline at detection, and recovery status. Eye measures completion among shoppers or attempts that reached the transition. Downstream volume alerts attach to the upstream incident when the downstream completion rate holds. A separate drop in conditional completion opens its own incident, with its own recovery timeline. The first report appears while a separate worker gathers deeper evidence. Each evidence branch shows what supports the explanation, what weakens it, and what remains unresolved. Later observations can update the branches after the incident recovers. **View evidence** shows the observations and event IDs.
+Each incident card shows the first measured workflow break, scope, completion rate versus baseline at detection, and recovery status. Eye measures completion among shoppers or attempts that reached the transition. Downstream volume alerts attach to the upstream incident when the downstream completion rate holds. Overlapping breaches of the same step and compatible scope stay attached to the open incident. A separate drop in conditional completion opens its own incident. Eye declares recovery after twelve consecutive healthy evaluations. The first report appears while a separate worker gathers deeper evidence. Each evidence branch shows what supports the explanation, what weakens it, and what remains unresolved. Later observations can update the branches after the incident recovers. **View evidence** shows the observations and event IDs.
 
 ## Regression checks
 
@@ -77,7 +83,7 @@ python -m eye init
 python -m eye serve
 ```
 
-In a second terminal with the same configuration, run `python -m eye simulate` to emit committed virtual hours continuously. The simulator and the monitoring service coordinate through completed windows in PostgreSQL. Scenario controls stay in the test lab.
+In a second terminal with the same configuration, run `python -m eye simulate` to generate virtual hours continuously. The simulator advances the publication clock in five-minute increments in PostgreSQL. Scenario controls stay in the test lab.
 
 ## Interfaces
 

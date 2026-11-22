@@ -9,6 +9,8 @@ from eye import simulator
 from eye.db import connect
 from eye.scenario import LAB_SEED, RECOVERY_HOURS, Scenario
 
+TICK_DELAY = 0.6
+
 
 def reply(**message):
     print(json.dumps(message, default=str), flush=True)
@@ -28,10 +30,14 @@ def generate(command):
 
     for index in range(total):
         with connect() as db:
-            simulator.emit(db, clock, seed=LAB_SEED, patterned=True, scenario=spec if index < hours else None)
+            simulator.emit(db, clock, seed=LAB_SEED, patterned=True, scenario=spec if index < hours else None,
+                           staged=True)
+            for cutoff in simulator.publication_ticks(clock, drain=index == total - 1):
+                simulator.publish_through(db, clock, cutoff)
+                db.commit()
+                sleep(TICK_DELAY)
         reply(id=identifier, event="window", window_start=clock.isoformat(), published=index + 1)
         clock += simulator.HOUR
-        sleep(0.8)
     reply(id=identifier, event="finished")
 
 
