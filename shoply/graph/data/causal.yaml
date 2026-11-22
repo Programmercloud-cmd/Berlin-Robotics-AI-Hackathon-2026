@@ -1,0 +1,42 @@
+# Shoply metric graph (original Kickoff spec). Edges point from driver (src) to the metric it drives (dst).
+# Possible causes: tested hypotheses, never used as arithmetic.
+- src: search_relevance
+  dst: search_ctr
+  sign: +
+  lag_h: [0, 1]
+  prior: 0.6
+- src: in_stock_rate
+  dst: add_to_cart_rate
+  sign: +
+  lag_h: [0, 2]
+  prior: 0.5
+- src: in_stock_rate
+  dst: feed_purchase_rate
+  sign: +
+  lag_h: [0, 1]
+  prior: 0.5
+- src: delivered_units
+  dst: in_stock_rate
+  sign: +
+  lag_h: [0, 72]
+  prior: 0.5
+- src: po_units
+  dst: delivered_units
+  sign: +
+  lag_h: [48, 144]
+  prior: 0.4
+- src: platform_discounts
+  dst: conversion_rate
+  sign: +
+  lag_h: [0, 1]
+  prior: 0.3
+- src: acquisition_cost
+  dst: sessions
+  sign: +
+  lag_h: [0, 1]
+  prior: 0.4
+- src: pacing_ratio
+  dst: ad_revenue
+  sign: +
+  lag_h: [0, 1]
+  prior: 0.4

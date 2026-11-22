@@ -1,0 +1,413 @@
+# Shoply metric graph (original Kickoff spec). Edges point from driver (src) to the metric it drives (dst).
+# 29 starting metrics. sql = count/sum; numerator_sql/denominator_sql = ratio/gauge;
+# cross_table = aggregate each side to ts + shared dims, then join and divide.
+- id: contribution
+  name: Marketplace contribution
+  description: What the marketplace keeps after discounts, acquisition and payment costs
+  kind: sum
+  unit: eur
+  table: derived
+  expr: marketplace_fees + ad_revenue - platform_discounts - acquisition_cost - payment_costs
+  dimensions:
+  - country
+  good_direction: up
+- id: marketplace_fees
+  name: Marketplace fees
+  description: Commission earned on every order
+  kind: sum
+  unit: eur
+  table: fact_commerce
+  sql: SUM(fees_eur)
+  dimensions:
+  - country
+  - platform
+  - channel
+  - category
+  good_direction: up
+- id: take_rate
+  name: Take rate
+  description: Fees as a share of GMV; depends on the category mix
+  kind: ratio
+  unit: share
+  table: fact_commerce
+  numerator_sql: SUM(fees_eur)
+  denominator_sql: SUM(gmv_eur)
+  dimensions:
+  - country
+  - platform
+  - channel
+  - category
+  good_direction: up
+- id: gmv
+  name: Gross merchandise value
+  description: Value of all paid orders
+  kind: sum
+  unit: eur
+  table: fact_commerce
+  sql: SUM(gmv_eur)
+  dimensions:
+  - country
+  - platform
+  - channel
+  - category
+  good_direction: up
+- id: platform_discounts
+  name: Platform-funded discounts
+  description: Discounts paid by the marketplace, not by sellers
+  kind: sum
+  unit: eur
+  table: fact_commerce
+  sql: SUM(discounts_eur)
+  dimensions:
+  - country
+  - platform
+  - channel
+  - category
+  good_direction: down
+- id: ad_revenue
+  name: Sponsored ads revenue
+  description: What sellers spent on sponsored-product ads
+  kind: sum
+  unit: eur
+  table: fact_ads
+  sql: SUM(spend_eur)
+  dimensions:
+  - country
+  - advertiser
+  good_direction: up
+  services:
+  - ads-pacing
+- id: acquisition_cost
+  name: Paid acquisition cost
+  description: What the marketplace pays for paid-channel traffic
+  kind: sum
+  unit: eur
+  table: fact_traffic
+  sql: SUM(acquisition_cost_eur)
+  dimensions:
+  - country
+  - platform
+  - channel
+  good_direction: down
+  services:
+  - marketing
+- id: payment_costs
+  name: Payment costs
+  description: 'Provider fees: a share of GMV plus a fixed fee per checkout'
+  kind: sum
+  unit: eur
+  table: fact_commerce
+  sql: SUM(payment_costs_eur)
+  dimensions:
+  - country
+  - platform
+  - channel
+  - category
+  good_direction: down
+- id: sessions
+  name: Sessions
+  description: Visits to the marketplace, all channels
+  kind: count
+  unit: count
+  table: fact_traffic
+  sql: SUM(sessions)
+  dimensions:
+  - country
+  - platform
+  - channel
+  good_direction: up
+  services:
+  - marketing
+  - app-ios
+  - app-android
+  - web-frontend
+- id: product_views
+  name: Product views
+  description: Product views from search, the For You feed and direct navigation
+  kind: count
+  unit: count
+  table: fact_commerce
+  sql: SUM(search_views + feed_views + direct_views)
+  dimensions:
+  - country
+  - platform
+  - channel
+  - category
+  good_direction: up
+- id: view_rate
+  name: Product views per session
+  description: How many products a visit looks at
+  kind: ratio
+  unit: share
+  table: cross_table
+  numerator:
+    table: fact_commerce
+    sql: SUM(search_views + feed_views + direct_views)
+  denominator:
+    table: fact_traffic
+    sql: SUM(sessions)
+  dimensions:
+  - country
+  - platform
+  - channel
+  good_direction: up
+- id: add_to_cart_rate
+  name: Add-to-cart rate
+  description: Share of product views added to the cart
+  kind: ratio
+  unit: share
+  table: fact_commerce
+  numerator_sql: SUM(carts)
+  denominator_sql: SUM(search_views + feed_views + direct_views)
+  dimensions:
+  - country
+  - platform
+  - channel
+  - category
+  good_direction: up
+  services:
+  - app-ios
+  - app-android
+  - web-frontend
+- id: checkout_rate
+  name: Checkout start rate
+  description: Share of carts that start checkout
+  kind: ratio
+  unit: share
+  table: fact_commerce
+  numerator_sql: SUM(checkouts)
+  denominator_sql: SUM(carts)
+  dimensions:
+  - country
+  - platform
+  - channel
+  - category
+  good_direction: up
+  services:
+  - checkout
+  - app-ios
+  - app-android
+  - web-frontend
+- id: payment_success_rate
+  name: Payment success rate
+  description: Share of checkouts whose payment succeeds
+  kind: ratio
+  unit: share
+  table: fact_commerce
+  numerator_sql: SUM(orders)
+  denominator_sql: SUM(checkouts)
+  dimensions:
+  - country
+  - platform
+  - channel
+  - category
+  good_direction: up
+  services:
+  - payments-android
+  - payments-ios
+  - payments-web
+  - checkout
+- id: orders
+  name: Orders
+  description: Paid orders
+  kind: count
+  unit: count
+  table: fact_commerce
+  sql: SUM(orders)
+  dimensions:
+  - country
+  - platform
+  - channel
+  - category
+  good_direction: up
+- id: conversion_rate
+  name: Session conversion rate
+  description: Orders per session
+  kind: ratio
+  unit: share
+  table: cross_table
+  numerator:
+    table: fact_commerce
+    sql: SUM(orders)
+  denominator:
+    table: fact_traffic
+    sql: SUM(sessions)
+  dimensions:
+  - country
+  - platform
+  - channel
+  good_direction: up
+- id: searches
+  name: Searches
+  description: Search queries submitted
+  kind: count
+  unit: count
+  table: fact_traffic
+  sql: SUM(searches)
+  dimensions:
+  - country
+  - platform
+  - channel
+  good_direction: up
+  services:
+  - search
+- id: search_ctr
+  name: Search click-through rate
+  description: Product views from search per search
+  kind: ratio
+  unit: share
+  table: cross_table
+  numerator:
+    table: fact_commerce
+    sql: SUM(search_views)
+  denominator:
+    table: fact_traffic
+    sql: SUM(searches)
+  dimensions:
+  - country
+  - platform
+  - channel
+  good_direction: up
+  services:
+  - search
+- id: search_relevance
+  name: Search relevance score
+  description: Average relevance score of returned results (0-1)
+  kind: gauge
+  unit: score
+  table: fact_traffic
+  numerator_sql: SUM(relevance_sum)
+  denominator_sql: SUM(relevance_n)
+  dimensions:
+  - country
+  - platform
+  good_direction: up
+  services:
+  - search
+- id: direct_views
+  name: Direct product views
+  description: Product views not from search or the For You feed
+  kind: count
+  unit: count
+  table: fact_commerce
+  sql: SUM(direct_views)
+  dimensions:
+  - country
+  - platform
+  - channel
+  - category
+  good_direction: up
+- id: feed_impressions
+  name: For You impressions
+  description: Products shown in the personalised For You feed
+  kind: count
+  unit: count
+  table: fact_commerce
+  sql: SUM(feed_impressions)
+  dimensions:
+  - country
+  - platform
+  - category
+  good_direction: up
+  services:
+  - recs-model
+- id: feed_ctr
+  name: For You click-through rate
+  description: Product views per For You impression
+  kind: ratio
+  unit: share
+  table: fact_commerce
+  numerator_sql: SUM(feed_views)
+  denominator_sql: SUM(feed_impressions)
+  dimensions:
+  - country
+  - platform
+  - category
+  good_direction: up
+  services:
+  - recs-model
+- id: feed_purchase_rate
+  name: For You purchase rate
+  description: Orders per product view from the For You feed
+  kind: ratio
+  unit: share
+  table: fact_commerce
+  numerator_sql: SUM(feed_orders)
+  denominator_sql: SUM(feed_views)
+  dimensions:
+  - country
+  - platform
+  - category
+  good_direction: up
+  services:
+  - recs-model
+- id: in_stock_rate
+  name: In-stock rate
+  description: Demand-weighted share of products in stock
+  kind: gauge
+  unit: share
+  table: fact_inventory
+  numerator_sql: SUM(in_stock * demand_weight)
+  denominator_sql: SUM(demand_weight)
+  dimensions:
+  - category
+  good_direction: up
+- id: delivered_units
+  name: Units delivered by suppliers
+  description: Units received from wholesale suppliers
+  kind: count
+  unit: count
+  table: fact_inventory
+  sql: SUM(delivered_units)
+  dimensions:
+  - category
+  good_direction: up
+- id: po_units
+  name: Units ordered from suppliers
+  description: Units on new wholesale purchase orders
+  kind: count
+  unit: count
+  table: fact_inventory
+  sql: SUM(po_units)
+  dimensions:
+  - category
+  good_direction: up
+- id: sponsored_clicks
+  name: Sponsored ad clicks
+  description: Clicks on sponsored-product ads
+  kind: count
+  unit: count
+  table: fact_ads
+  sql: SUM(clicks)
+  dimensions:
+  - country
+  - advertiser
+  good_direction: up
+  services:
+  - ads-pacing
+- id: avg_cpc
+  name: Average cost per click
+  description: Ad spend per sponsored click
+  kind: ratio
+  unit: eur
+  table: fact_ads
+  numerator_sql: SUM(spend_eur)
+  denominator_sql: SUM(clicks)
+  dimensions:
+  - country
+  - advertiser
+  good_direction: up
+- id: pacing_ratio
+  name: Budget pacing ratio
+  description: Cumulative spend today / cumulative planned spend today (1.0 = on schedule)
+  kind: gauge
+  unit: share
+  table: fact_ads
+  numerator_sql: SUM(SUM(spend_eur)) OVER (PARTITION BY advertiser, local_day ORDER BY ts)
+  denominator_sql: SUM(SUM(planned_spend_eur)) OVER (PARTITION BY advertiser, local_day ORDER BY ts)
+  note: local_day = CAST(timezone('Europe/Berlin', ts) AS DATE); target value 1.0, alert in both directions
+  dimensions:
+  - advertiser
+  good_direction: two_sided
+  services:
+  - ads-pacing

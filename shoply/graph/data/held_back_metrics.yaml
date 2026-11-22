@@ -1,0 +1,33 @@
+# Shoply metric graph (original Kickoff spec). Edges point from driver (src) to the metric it drives (dst).
+# Added live during the demo through the extender. Not part of the starting graph.
+- id: avg_order_value
+  name: Average order value
+  description: GMV per paid order
+  kind: ratio
+  unit: eur
+  table: fact_commerce
+  numerator_sql: SUM(gmv_eur)
+  denominator_sql: SUM(orders)
+  expected_discovery: formula gmv = orders * avg_order_value
+  dimensions:
+  - country
+  - platform
+  - channel
+  - category
+  good_direction: up
+- id: for_you_oos_exposure_share
+  name: For You out-of-stock exposure share
+  description: Share of For You impressions showing out-of-stock products
+  kind: ratio
+  unit: share
+  table: fact_commerce
+  numerator_sql: SUM(feed_oos_impressions)
+  denominator_sql: SUM(feed_impressions)
+  expected_discovery: breakdown by category; causal feed_purchase_rate, sign -
+  dimensions:
+  - country
+  - platform
+  - category
+  good_direction: up
+  services:
+  - recs-model

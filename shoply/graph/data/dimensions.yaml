@@ -1,0 +1,8 @@
+# Shoply metric graph (original Kickoff spec). Edges point from driver (src) to the metric it drives (dst).
+# Allowed values per dimension. Time zone for all countries: Europe/Berlin.
+country: [de, fr, es, nl, pl]
+platform: [android, ios, web]
+channel: [organic, paid, for_you]
+category: [electronics, fashion, home, beauty, toys]
+advertiser: [adv_001, adv_002, adv_003, adv_004, adv_005, adv_006, adv_007, adv_008, adv_009, adv_010, adv_011, adv_012, adv_013, adv_014, adv_015,
+  adv_016, adv_017, adv_018, adv_019, adv_020, adv_021, adv_022, adv_023, adv_024, adv_025, adv_026, adv_027, adv_028, adv_029, adv_030]
