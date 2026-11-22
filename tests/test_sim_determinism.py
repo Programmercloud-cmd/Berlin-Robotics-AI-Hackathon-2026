@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from shoply.sim.scenarios import Scenario
-from shoply.sim.simulator import Simulator
+from shoply.sim.simulator import HourRNG, Simulator, hour_index
 from shoply.warehouse.schema import COLUMNS, FACT_TABLES
 
 START, END = datetime(2026, 10, 25), datetime(2026, 10, 27)
@@ -154,4 +154,13 @@ def test_zero_aov_scenario_keeps_money_finite():
 
 def test_start_before_history_rejected():
     with pytest.raises(ValueError):
-        Simulator(":memory:", start=datetime(2026, 8, 1))
+        Simulator(":memory:", start=datetime(2025, 10, 26, 23))
+
+
+def test_hours_before_the_default_start_have_their_own_seeds():
+    """The year before 2026-08-31 has negative hour indices; each still gets distinct, repeatable draws."""
+    assert hour_index(datetime(2025, 10, 27)) < 0
+    a, b, c = (HourRNG(42, hour_index(t)).uniform("x", 4)
+               for t in (datetime(2025, 10, 27), datetime(2025, 10, 27, 1), datetime(2025, 10, 27)))
+    assert (a == c).all() and not (a == b).any()
+    assert not (HourRNG(42, -5).uniform("x", 4) == HourRNG(42, 5).uniform("x", 4)).any()

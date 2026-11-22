@@ -1,9 +1,14 @@
-"""Baseline behaviour from the simulator spec, measured on history (no scenario is active)."""
+"""Baseline behaviour from the simulator spec, measured on history (no scenario is active).
+
+`world` starts 2026-08-31, where params.py holds the current rates; calendar.yaml adds payday
+windows, holidays, back-to-school and the growth trend on top.
+"""
 from datetime import date, datetime
 
 import pytest
 
 from shoply.sim import params as P
+from shoply.sim.calendar import load_calendar
 from shoply.sim.simulator import HOURLY, Simulator, expected_daily_orders
 from tests.conftest import q
 
@@ -12,9 +17,14 @@ DAYS = 56
 
 
 def test_history_has_no_scenario_events(world):
-    assert q(world, f"SELECT COUNT(*) FROM events WHERE {CLEAN} AND type NOT IN ('release', 'holiday')") == 0
-    assert q(world, f"SELECT COUNT(*) FROM events WHERE {CLEAN} AND description NOT LIKE '%routine release' "
-                    "AND type = 'release'") == 0
+    calendar = sorted(load_calendar().ids)
+    others = world.con.execute(f"SELECT id FROM events WHERE {CLEAN} AND type <> 'release' "
+                               f"AND id NOT IN (SELECT UNNEST(?::VARCHAR[]))", [calendar]).fetchall()
+    assert others == []
+    assert q(world, f"SELECT bool_and(planned) FROM events WHERE {CLEAN} AND type <> 'release'")
+    releases = world.con.execute(f"SELECT id FROM events WHERE {CLEAN} AND type = 'release' "
+                                 "AND description NOT LIKE '%routine release' ORDER BY ts").fetchall()
+    assert releases == [("ads_pacing_bug_adv_005",), ("ads_pacing_bug_adv_005_end",)]       # past incident
 
 
 def test_history_equals_no_scenario_run(world, baseline):
@@ -30,9 +40,9 @@ def test_hour_curve():
 
 
 def test_sessions_per_day(world):
-    # first full weekdays: lambda = 600k/day * (1 + 0.001 * day)
+    # first full weekdays: lambda = 600k/day * 1.15 ** (day / 365); payday x1.05 on Aug 31, Sep 1 and 2
     wk = q(world, "SELECT SUM(sessions) / 5 FROM fact_traffic WHERE ts >= '2026-08-31' AND ts < '2026-09-05'")
-    assert wk == pytest.approx(600_000 * 1.002, rel=0.03)
+    assert wk == pytest.approx(600_000 * 1.15 ** (2 / 365) * (1 + 0.05 * 3 / 5), rel=0.03)
     assert q(world, f"SELECT SUM(sessions) / {DAYS} FROM fact_traffic WHERE {CLEAN}") == pytest.approx(600_000, rel=0.08)
 
 
@@ -40,7 +50,7 @@ def test_trend(world):
     sql = "SELECT SUM(sessions) FROM fact_traffic WHERE ts >= '{}' AND ts < '{}'"
     early = q(world, sql.format("2026-09-07", "2026-09-21"))
     late = q(world, sql.format("2026-10-05", "2026-10-19"))
-    assert late / early == pytest.approx(1.028 / 1.0, abs=0.02)
+    assert late / early == pytest.approx(1.15 ** (28 / 365), abs=0.02)
 
 
 def test_dimension_shares(world):
@@ -132,10 +142,8 @@ def test_holiday(world):
     assert str(e[2]) == "2026-10-02 22:00:00"
     # A/B on the same seed (common random numbers): DE sessions x0.8 for the Berlin day, other countries unchanged
     runs = []
-    for holidays in (True, False):
-        sim = Simulator(":memory:", seed=42, scenarios=None, start=datetime(2026, 10, 2))
-        if not holidays:
-            sim._holiday_mult = {}
+    for exclude in ([], ["holiday_de_2026-10-03"]):
+        sim = Simulator(":memory:", seed=42, scenarios=None, start=datetime(2026, 10, 2), exclude=exclude)
         sim.run_until(datetime(2026, 10, 4, 6))
         runs.append(sim)
     sql = ("SELECT SUM(sessions) FROM fact_traffic WHERE country = '{}' "

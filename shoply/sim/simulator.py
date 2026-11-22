@@ -5,7 +5,8 @@ additive counts and EUR sums into DuckDB. Scenario effects multiply (or, for a
 few parameters, replace) the simulator's own parameters, never its outputs.
 
 Randomness: every hour draws from its own `SeedSequence([seed, hour_index])`
-(hour_index = hours since 2026-08-31 00:00 UTC). Each draw site gets a child
+(hour_index = hours since 2026-08-31 00:00 UTC; earlier hours of the year use
+`[seed, 2**32 - 1, -hour_index]`). Each draw site gets a child
 stream of that sequence and samples by inverse CDF from a fixed number of
 uniforms, so a scenario that changes one row's parameter leaves the random
 numbers of every other row untouched (common random numbers): A/B runs with and
@@ -28,11 +29,12 @@ from scipy import stats
 
 from shoply.contracts import Event, seg_key
 from shoply.sim import params as P
-from shoply.sim.scenarios import DEFAULT_PATH, Scenario, ScenarioSet, holiday_events, load_scenarios
+from shoply.sim.calendar import DEFAULT_CALENDAR, Calendar, load_calendar
+from shoply.sim.scenarios import DEFAULT_PATH, Scenario, ScenarioSet, load_scenarios
 from shoply.warehouse.schema import COLUMNS, create_schema
 
 HOUR = timedelta(hours=1)
-STATE_VERSION = 1
+STATE_VERSION = 2
 
 CO = list(P.COUNTRIES)
 PL = list(P.PLATFORMS)
@@ -84,7 +86,7 @@ class HourRNG:
     """Random draws of one hour; one child stream of SeedSequence([seed, hour]) per draw site."""
 
     def __init__(self, seed: int, hi: int):
-        self.entropy = [int(seed), int(hi)]
+        self.entropy = [int(seed), int(hi)] if hi >= 0 else [int(seed), 2**32 - 1, -int(hi)]
 
     def gen(self, site: str) -> np.random.Generator:
         return np.random.default_rng(np.random.SeedSequence(self.entropy, spawn_key=(zlib.crc32(site.encode()),)))
@@ -138,8 +140,10 @@ class Simulator:
     def __init__(self, db: str | Path | duckdb.DuckDBPyConnection = ":memory:", seed: int = 42,
                  scenarios: str | Path | list[Scenario] | None = DEFAULT_PATH,
                  exclude: Iterable[str] = (), start: datetime = P.HISTORY_START):
-        if start < P.HISTORY_START:
-            raise ValueError(f"start must not be before {P.HISTORY_START}")
+        if start.minute or start.second or start.microsecond:
+            raise ValueError(f"start must be a whole UTC hour, got {start}")
+        if start < P.YEAR_START:
+            raise ValueError(f"start must not be before {P.YEAR_START}")
         self.con = db if isinstance(db, duckdb.DuckDBPyConnection) else duckdb.connect(str(db))
         create_schema(self.con)
         if self.con.execute("SELECT COUNT(*) FROM ingestion_log").fetchall()[0][0]:
@@ -152,13 +156,13 @@ class Simulator:
         else:
             library = list(scenarios)
         self.library = {s.id: s for s in library}
+        self.calendar: Calendar = load_calendar(DEFAULT_CALENDAR)
         exclude = set(exclude)
-        unknown = exclude - set(self.library)
+        unknown = exclude - set(self.library) - self.calendar.ids
         if unknown:
-            raise ValueError(f"unknown scenario ids in exclude: {sorted(unknown)}")
-        self.scenarios = ScenarioSet([s for s in library if s.id not in exclude])
-        self.holidays = holiday_events()
-        self._holiday_mult = {(h["country"], date.fromisoformat(h["date"])): h["sessions"] for h in P.HOLIDAYS}
+            raise ValueError(f"unknown scenario or calendar ids in exclude: {sorted(unknown)}")
+        self.scenarios = ScenarioSet([s for s in [*self.calendar.scenarios, *library]
+                                      if s.id not in exclude and s.id.removesuffix("_before") not in exclude])
         self.start = start
         self.now = start                         # next hour to generate
         self._buf: dict[str, list[pd.DataFrame]] = {t: [] for t in COLUMNS}
@@ -230,7 +234,7 @@ class Simulator:
 
     # ------------------------------------------------------------- public API
     def build_history(self, until: datetime = P.LIVE_START) -> None:
-        """Generate 2026-08-31 .. 2026-10-25 (8 weeks before the live start, no scenario is active)."""
+        """Generate history from `start` to the live start (calendar and past incidents, no demo scenario)."""
         self.run_until(until)
 
     generate_history = build_history
@@ -343,10 +347,8 @@ class Simulator:
         g, n, sc = self.tg, self.nt, self.scenarios
         co, ch = g["country"], g["channel"]
         mult = lambda e: sc.multiplier(e, ts, g, n)  # noqa: E731
-        day = (loc.day - P.HISTORY_START.date()).days
-        holiday = np.array([self._holiday_mult.get((c, loc.day), 1.0) for c in co])
         lam = (P.DAILY_SESSIONS / 24 * HOURLY[loc.hour] * self.t_share
-               * (self.t_weekend if loc.weekend else 1.0) * (1 + P.TREND_PER_DAY * day) * holiday
+               * (self.t_weekend if loc.weekend else 1.0) * self.calendar.growth(loc.day)
                * mult("sessions"))
         k = P.SESSION_GAMMA_SHAPE
         sessions = r.poisson("sessions", lam * r.gamma("sessions.noise", np.full(n, k), 1 / k))
@@ -427,8 +429,8 @@ class Simulator:
         over = np.bincount(self.cat_idx_c, weights=ord_n + ord_f, minlength=k) > cat_stock
         if not over.any():
             return
-        rng = r.gen("stockout")
         for ci in np.nonzero(over)[0]:
+            rng = r.gen(f"stockout.{ci}")             # per category: other categories keep their draws
             rows = np.nonzero(self.cat_idx_c == ci)[0]
             kept = rng.multivariate_hypergeometric(np.concatenate([ord_n[rows], ord_f[rows]]), int(cat_stock[ci]))
             frac = 1 - cat_stock[ci] / (ord_n[rows].sum() + ord_f[rows].sum())
@@ -459,9 +461,9 @@ class Simulator:
         return delivered
 
     def _inventory_end(self, ts, r: HourRNG, cat_orders, delivered) -> pd.DataFrame:
-        rng = r.gen("inventory")
         sold = np.zeros(self.ni, dtype=np.int64)
         for ci in range(len(CAT)):                    # orders go to in-stock SKUs by true demand
+            rng = r.gen(f"inventory.{ci}")
             sl = self._cat_slice(ci)
             left = int(cat_orders[ci])
             while left > 0:
@@ -533,8 +535,7 @@ class Simulator:
                       planned=False)]
 
     def _write_events(self, ts, r: HourRNG) -> None:
-        evs: list[Event] = ([e for e in self.holidays if e.ts == ts] + self.scenarios.events_at(ts)
-                            + self._background_releases(ts, r))
+        evs: list[Event] = self.scenarios.events_at(ts) + self._background_releases(ts, r)
         if evs:
             self._buf["events"].append(pd.DataFrame([{
                 "id": e.id, "ts": e.ts, "type": e.type, "service": e.service,
@@ -577,7 +578,8 @@ class Simulator:
 
 
 def build(db: str | Path, seed: int = 42, until: datetime = P.LIVE_START,
-          exclude: Iterable[str] = (), start: datetime = P.HISTORY_START) -> Simulator:
+          exclude: Iterable[str] = (), start: datetime = P.YEAR_START) -> Simulator:
+    """Full year of history (2025-10-27 .. 2026-10-25) by default."""
     sim = Simulator(db, seed=seed, exclude=exclude, start=start)
     sim.run_until(until)
     return sim

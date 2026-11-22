@@ -100,12 +100,21 @@ class ScenarioSet:
 
     def __init__(self, scenarios: list[Scenario]):
         self.scenarios = list(scenarios)
+        self._reset()
+
+    def _reset(self) -> None:
+        self._active_ts: Optional[datetime] = None
+        self._active: list[Scenario] = []
+        self._events: Optional[dict[datetime, list[Event]]] = None
 
     def add(self, s: Scenario) -> None:
         self.scenarios.append(s)
+        self._reset()
 
     def active(self, ts: datetime) -> list[Scenario]:
-        return [s for s in self.scenarios if s.active(ts)]
+        if ts != self._active_ts:
+            self._active_ts, self._active = ts, [s for s in self.scenarios if s.active(ts)]
+        return self._active
 
     def multiplier(self, effect: str, ts: datetime, grid: dict[str, np.ndarray], n: int) -> np.ndarray:
         """Product of all active multiplicative `effect`s, per row of a grid.
@@ -140,7 +149,12 @@ class ScenarioSet:
         return c
 
     def events_at(self, ts: datetime) -> list[Event]:
-        return [e for s in self.scenarios for e in s.events() if e.ts == ts]
+        if self._events is None:
+            self._events = {}
+            for s in self.scenarios:
+                for e in s.events():
+                    self._events.setdefault(e.ts, []).append(e)
+        return list(self._events.get(ts, []))
 
 
 def _scope_mask(scope: dict, grid: dict[str, np.ndarray], n: int) -> Optional[np.ndarray]:
@@ -152,15 +166,4 @@ def _scope_mask(scope: dict, grid: dict[str, np.ndarray], n: int) -> Optional[np
     return mask
 
 
-def holiday_events() -> list[Event]:
-    from zoneinfo import ZoneInfo
-    out = []
-    for h in P.HOLIDAYS:
-        local_midnight = datetime.fromisoformat(h["date"]).replace(tzinfo=ZoneInfo(P.TIMEZONES[h["country"]]))
-        ts = local_midnight.astimezone(timezone.utc).replace(tzinfo=None)
-        out.append(Event(id=h["id"], ts=ts, type="holiday", scope={"country": h["country"]},
-                         description=h["description"], planned=True))
-    return out
-
-
-__all__ = ["Scenario", "ScenarioSet", "load_scenarios", "holiday_events", "seg_key"]
+__all__ = ["Scenario", "ScenarioSet", "load_scenarios", "seg_key"]
