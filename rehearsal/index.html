@@ -11,16 +11,19 @@
 <body>
   <header class="bar">
     <div class="shell header-row">
-      <a class="brand" href="/#telemetry"><span class="eye-mark" aria-hidden="true"></span>Eye of the System</a>
-      <a class="header-link" id="dashboard-link" target="_blank" rel="noopener" hidden>Replay dashboard <span aria-hidden="true">↗</span></a>
+      <a class="brand" href="#landing"><span class="eye-mark" aria-hidden="true"></span>Eye of the System</a>
+      <span id="current-chapter" class="current-chapter">Devin-led investigation</span>
     </div>
+    <div class="reading-progress" aria-hidden="true"></div>
   </header>
-  <main class="shell">
-    <section class="hero" aria-labelledby="hero-title">
+  <main>
+    <section class="shell hero" id="landing" aria-labelledby="hero-title">
       <div class="hero-copy">
         <p class="eyebrow"><span class="signal-dot" aria-hidden="true"></span> Devin-led investigation</p>
-        <h1 id="hero-title">Payment <span>timeout.</span></h1>
+        <h1 id="hero-title" tabindex="-1">Payment <span>timeout.</span></h1>
         <p class="context" id="replay-status" role="status">Loading replay…</p>
+        <a class="begin" href="#telemetry" id="begin" hidden>Start walkthrough <span aria-hidden="true">↓</span></a>
+        <p class="keyboard-guide" id="keyboard-guide" hidden><kbd>Space</kbd> or <kbd>↓</kbd> next chapter · Scroll for detail</p>
       </div>
       <div class="signal-art" aria-hidden="true">
         <div class="signal-grid"></div>
@@ -31,32 +34,7 @@
         </div>
       </div>
     </section>
-    <nav class="pipeline" aria-label="Replay pipeline">
-      <ol>
-        <li><a href="#telemetry"><span class="pipeline-node" aria-hidden="true"></span><span>Telemetry</span></a></li>
-        <li><a href="#discovery"><span class="pipeline-node" aria-hidden="true"></span><span>Discovery</span></a></li>
-        <li><a href="#registration"><span class="pipeline-node" aria-hidden="true"></span><span>Metric registration</span></a></li>
-        <li><a href="#detection"><span class="pipeline-node" aria-hidden="true"></span><span>Detection</span></a></li>
-        <li><a href="#recovery"><span class="pipeline-node" aria-hidden="true"></span><span>Investigation &amp; recovery</span></a></li>
-      </ol>
-    </nav>
-    <article class="stop" id="stop" aria-labelledby="stop-title">
-      <div class="stop-copy">
-        <p class="eyebrow" id="position"></p>
-        <h2 id="stop-title" tabindex="-1">Telemetry</h2>
-        <p id="stop-summary" class="summary"></p>
-        <div id="links" class="links"></div>
-      </div>
-      <div id="facts" class="facts" hidden></div>
-    </article>
-    <details id="technical" class="technical" hidden>
-      <summary><span>Technical pipeline</span><span id="technical-count"></span></summary>
-      <div id="technical-body" class="technical-body"></div>
-    </details>
-    <nav class="controls" aria-label="Walkthrough steps">
-      <a id="previous" hidden>← Previous</a>
-      <a id="next" hidden>Next →</a>
-    </nav>
+    <div id="story"></div>
   </main>
 </body>
 </html>

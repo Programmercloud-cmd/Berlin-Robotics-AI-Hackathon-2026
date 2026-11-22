@@ -18,6 +18,9 @@ function node(tag, text, className) {
 
 function table(headers, rows) {
   const wrapper = node("div", undefined, "method-table");
+  wrapper.tabIndex = 0;
+  wrapper.setAttribute("role", "region");
+  wrapper.setAttribute("aria-label", headers.join(", "));
   const grid = node("table");
   const heading = node("thead");
   const headingRow = node("tr");
@@ -44,12 +47,22 @@ function code(text) {
   return pre;
 }
 
-function badgeLink([label, url]) {
+function evidenceLink([label, url, download]) {
   const link = node("a", label);
   link.href = url;
-  link.target = "_blank";
-  link.rel = "noopener";
+  if (download) link.download = "";
+  else {
+    link.target = "_blank";
+    link.rel = "noopener";
+  }
   return link;
+}
+
+export function evidenceRail(links, title) {
+  const rail = node("aside", undefined, "evidence-rail");
+  rail.setAttribute("aria-label", "Evidence for " + title);
+  rail.append(...links.map(evidenceLink));
+  return rail;
 }
 
 function readOutput(read) {
@@ -75,34 +88,25 @@ function readOutput(read) {
 }
 
 function requestedReads(reads) {
-  return reads.map((read) => {
-    const details = node("details", undefined, "method-read");
-    const title = node("summary");
-    title.append(node("code", read.id + " · " + read.tool));
-    if (read.cited || !read.available) title.append(node("span", read.cited ? "Cited" : "Unavailable"));
-    details.append(
-      title,
-      node("p", read.reason),
-      code(json(read.params)),
-      ...readOutput(read),
-      badgeLink(record(read.id, "Full request and response ↗"))
-    );
-    return details;
-  });
+  return reads.map((read) => ({
+    id: read.id,
+    label: read.tool,
+    status: read.id + (read.cited ? " · Cited" : read.available ? "" : " · Unavailable"),
+    note: read.reason,
+    snippet: json(read.params),
+    view: () => readOutput(read),
+    links: [record(read.id, read.id + " request and response ↗")]
+  }));
 }
 
 function conclusionDetails(data) {
-  const detail = node("details", undefined, "method-read");
-  const citations = node("div", undefined, "method-links");
-  citations.append(...data.alternative.evidence_ids.map((id) => badgeLink(record(id))));
-  detail.append(
-    node("summary", "Alternative and stopping decision"),
-    node("p", data.alternative.alternative),
-    node("p", data.alternative.weakened_by),
-    citations,
-    node("p", data.stop_reason)
-  );
-  return detail;
+  return [{
+    id: "alternative",
+    label: "Alternative and stopping decision",
+    note: data.alternative.alternative,
+    view: () => [node("p", data.alternative.weakened_by), node("p", data.stop_reason)],
+    links: data.alternative.evidence_ids.map((id) => record(id, id + " supporting evidence ↗"))
+  }];
 }
 
 const methods = {
@@ -137,7 +141,7 @@ const methods = {
       id: "lab-api", label: "Lab API equivalent",
       note: "These routes are used by the separate Lab UI. The recorded fixture drove the simulator directly.",
       snippet: 'POST /api/replay  { ...scenario }\nPOST /api/plans/{plan_id}/apply\nGET  /api/lab\nGET  /api/runs/{run_id}/workflow',
-      links: [["Separate Lab preview ↗", d.lab_preview]]
+      links: [["Replay plan ↗", "/stripe-timeout.json"]]
     }
   ],
   discovery: (d) => [
@@ -272,7 +276,7 @@ const methods = {
       id: "batch-one", label: "Execute the first 3 reads",
       note: "Devin chose these reads. Eye validates targets and executes the read-only observations locally, then persists each request and result.",
       snippet: "read_query(dsn, frozen_snapshot, query)\n→ read-only PostgreSQL observation / frozen graph lookup\n→ evidence row with params, result and observation cutoff",
-      view: () => requestedReads(d.reads.slice(0, 3))
+      children: requestedReads(d.reads.slice(0, 3))
     },
     {
       id: "resume-two", label: "Turn 2 · Send results and poll",
@@ -283,7 +287,7 @@ const methods = {
     {
       id: "batch-two", label: "Execute the next 3 reads",
       note: "The second batch samples timeout events, compares marketplace outcomes, and inspects the graph around the timeout activity.",
-      view: () => requestedReads(d.reads.slice(3, 6))
+      children: requestedReads(d.reads.slice(3, 6))
     },
     {
       id: "resume-three", label: "Turn 3 · Request cited report",
@@ -296,7 +300,7 @@ const methods = {
       note: "Eye requires the report’s citations to refer to persisted evidence, with a successful new read cited when available. It saves the cited conclusion and uses the statistical report if validation or reasoning fails.",
       snippet: "Citations: " + d.citations.join(", ") + "\nDELETE " + currentSession + "\n" +
         "Recorded sessions: " + d.session_count + ". Transport endpoints are reconstructed from the implementation.",
-      view: () => conclusionDetails(d),
+      children: conclusionDetails(d),
       links: [record(d.conclusion_evidence, "Conclusion, alternative and stop reason ↗"), ["Original report ↗", d.report_url]]
     },
     {
@@ -311,44 +315,31 @@ const methods = {
   ]
 };
 
-export function renderMethods(details, stage, requested, data, focus) {
-  if (!data) return;
-  const entries = methods[stage](data);
-  const found = entries.find((entry) => entry.id === requested);
-  const current = found || entries[0];
-  details.hidden = false;
-  if (found || new URLSearchParams(location.search).get("technical") === "1") details.open = true;
-  details.querySelector("#technical-count").textContent = entries.length + " steps";
-  const rail = node("ol", undefined, "method-rail");
-  for (const entry of entries) {
-    const item = node("li");
-    const anchor = node("a", entry.label);
-    anchor.href = "#" + stage + "/" + entry.id;
-    if (entry === current) anchor.setAttribute("aria-current", "step");
-    item.append(anchor);
-    rail.append(item);
-  }
-  const panel = node("section", undefined, "method-panel");
-  const heading = node("h3", current.label);
+function methodRow(stage, entry, child = false) {
+  const row = node("li", undefined, "story-row method-step");
+  row.id = stage + "/" + entry.id;
+  if (child) row.classList.add("method-child");
+  if (entry.id === "parallel") row.classList.add("parallel-step");
+  const copy = node("div", undefined, "story-copy");
+  if (entry.status) copy.append(node("p", entry.status, "read-status"));
+  const heading = node(child ? "h4" : "h3", entry.label);
   heading.tabIndex = -1;
-  panel.append(heading, node("p", current.note));
-  if (current.snippet) panel.append(code(current.snippet));
-  if (current.view) {
-    const view = current.view();
-    panel.append(...(Array.isArray(view) ? view : [view]));
+  copy.append(heading, node("p", entry.note));
+  if (entry.snippet) copy.append(code(entry.snippet));
+  if (entry.view) {
+    const view = entry.view();
+    copy.append(...(Array.isArray(view) ? view : [view]));
   }
-  if (current.links) {
-    const links = node("div", undefined, "method-links");
-    links.append(...current.links.map(badgeLink));
-    panel.append(links);
+  row.append(copy);
+  if (entry.links?.length) row.append(evidenceRail(entry.links, entry.label));
+  return row;
+}
+
+export function renderMethods(stage, data) {
+  const timeline = node("ol", undefined, "method-timeline");
+  for (const entry of methods[stage](data)) {
+    timeline.append(methodRow(stage, entry));
+    for (const child of entry.children || []) timeline.append(methodRow(stage, child, true));
   }
-  details.querySelector("#technical-body").replaceChildren(rail, panel);
-  if (found) {
-    if (focus) heading.focus({ preventScroll: true });
-    requestAnimationFrame(() => {
-      if (heading.getBoundingClientRect().top > window.innerHeight - 110) {
-        details.scrollIntoView({ block: "start" });
-      }
-    });
-  }
+  return timeline;
 }

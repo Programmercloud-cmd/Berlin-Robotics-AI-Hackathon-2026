@@ -1,4 +1,4 @@
-import { renderMethods } from "./methods.js";
+import { evidenceRail, renderMethods } from "./methods.js";
 
 const byId = (id) => document.getElementById(id);
 const clock = new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", hour: "2-digit", minute: "2-digit" });
@@ -12,17 +12,6 @@ function element(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
   if (className) node.className = className;
-  return node;
-}
-
-function link([text, href, download]) {
-  const node = element("a", text);
-  node.href = href;
-  if (download) node.download = "";
-  else {
-    node.target = "_blank";
-    node.rel = "noopener";
-  }
   return node;
 }
 
@@ -49,32 +38,15 @@ function reading(label, value) {
   return row;
 }
 
-function trace(reads) {
-  const details = element("details", undefined, "trace");
-  const list = element("ul");
-  details.append(element("summary", reads.length + " Devin-requested reads"), list);
-  for (const read of reads) {
-    const row = element("li");
-    const anchor = link([read.title, evidence(read.id)]);
-    anchor.prepend(element("code", read.id));
-    if (read.cited || !read.available) {
-      anchor.append(element("small", read.available ? "Cited" : "Unavailable"));
-    }
-    row.append(anchor);
-    list.append(row);
-  }
-  return details;
-}
-
 const steps = [
   {
     id: "telemetry",
+    label: "Telemetry",
     title: "Private plan. Observed events.",
     summary: "The simulator applies the fault and publishes payment events to Eye.",
     links: (data) => [
       ["Observed event ↗", evidence(data.sample.evidence_id)],
-      ["Replay plan ↓", "/stripe-timeout.json", true],
-      ["Lab preview · separate run ↗", data.lab_preview]
+      ["Replay plan ↓", "/stripe-timeout.json", true]
     ],
     facts(data) {
       const event = element("div", undefined, "event");
@@ -88,6 +60,7 @@ const steps = [
   },
   {
     id: "discovery",
+    label: "Discovery",
     title: "Discover the workflow.",
     summary: "Eye links activity sequences observed on the same business objects.",
     links: (data) => [
@@ -108,6 +81,7 @@ const steps = [
   },
   {
     id: "registration",
+    label: "Metric registration",
     title: "Register the measure.",
     summary: "The replay registers Payment success rate on the discovered stream before the fault.",
     links: (data) => [
@@ -126,6 +100,7 @@ const steps = [
   },
   {
     id: "detection",
+    label: "Detection",
     title: "Eye opens the incident.",
     summary: "Eye persists the scoped breach before Devin’s report is ready.",
     links: (data) => [
@@ -145,6 +120,7 @@ const steps = [
   },
   {
     id: "recovery",
+    label: "Investigation & recovery",
     title: "Investigate. Track recovery.",
     summary: "Devin chooses bounded reads and cites its conclusion while Eye tracks recovery independently.",
     links: (data) => [
@@ -174,72 +150,105 @@ const steps = [
       });
       recovery.append(checks);
       proof.append(investigator, recovery);
-      return [proof, trace(data.reads)];
+      return [proof, datum("Devin requested", data.reads.length + " evidence reads")];
     }
   }
 ];
 
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
-const pipelineLinks = [...document.querySelectorAll(".pipeline a")];
-let snapshot;
-let activeIndex = -1;
-let transition;
+let chapters = [byId("landing")];
+let viewportFrame = 0;
 
-function render(focus = false) {
-  const [stage, substep] = location.hash.slice(1).split("/", 2);
-  const selected = steps.findIndex((step) => step.id === stage);
-  const index = Math.max(selected, 0);
-  const step = steps[index];
-  const changed = index !== activeIndex;
-  activeIndex = index;
-  const title = byId("stop-title");
-  title.textContent = step.title;
-  byId("position").textContent = (index + 1) + " / " + steps.length;
-  byId("stop-summary").textContent = step.summary;
-  byId("previous").hidden = index === 0;
-  if (index > 0) byId("previous").href = "#" + steps[index - 1].id;
-  byId("next").hidden = index === steps.length - 1;
-  if (index < steps.length - 1) byId("next").href = "#" + steps[index + 1].id;
-  document.querySelector(".pipeline").style.setProperty("--progress", index / (steps.length - 1));
-  pipelineLinks.forEach((anchor, position) => {
-    if (position === index) anchor.setAttribute("aria-current", "step");
-    else anchor.removeAttribute("aria-current");
-    anchor.toggleAttribute("data-complete", position < index);
-  });
-  const facts = byId("facts");
-  if (snapshot) {
-    facts.hidden = false;
-    facts.replaceChildren(...step.facts(snapshot));
-    byId("links").replaceChildren(...step.links(snapshot).map(link));
+function renderChapter(step, data) {
+  const chapter = element("section", undefined, "chapter");
+  chapter.id = step.id;
+  const heading = element("h2", step.title);
+  heading.id = step.id + "-title";
+  heading.tabIndex = -1;
+  chapter.setAttribute("aria-labelledby", heading.id);
+  const shell = element("div", undefined, "shell chapter-shell");
+  const intro = element("div", undefined, "story-row chapter-intro");
+  const copy = element("div", undefined, "story-copy");
+  const facts = element("div", undefined, "facts");
+  facts.append(...step.facts(data));
+  copy.append(element("p", step.label, "eyebrow"), heading, element("p", step.summary, "summary"), facts);
+  intro.append(copy, evidenceRail(step.links(data), step.label));
+  shell.append(intro, renderMethods(step.id, data));
+  chapter.append(shell);
+  return chapter;
+}
+
+function chapterIndex() {
+  const line = document.querySelector(".bar").offsetHeight + 60;
+  return Math.max(0, chapters.findLastIndex((chapter) => chapter.getBoundingClientRect().top <= line));
+}
+
+function updateViewport() {
+  viewportFrame = 0;
+  const maximum = document.documentElement.scrollHeight - innerHeight;
+  document.documentElement.style.setProperty("--page-progress", maximum > 0 ? scrollY / maximum : 0);
+  const index = chapterIndex();
+  const label = index ? steps[index - 1].label : "Devin-led investigation";
+  if (byId("current-chapter").textContent !== label) byId("current-chapter").textContent = label;
+  const cue = innerHeight * .47;
+  for (const chapter of chapters.slice(1)) {
+    const timeline = chapter.querySelector(".method-timeline");
+    const bounds = timeline.getBoundingClientRect();
+    const progress = Math.min(1, Math.max(0, (cue - bounds.top) / bounds.height));
+    timeline.style.setProperty("--trace-progress", progress);
   }
-  renderMethods(byId("technical"), step.id, substep, snapshot, focus);
-  if (changed && focus && !substep) {
-    title.focus({ preventScroll: true });
-    transition?.cancel();
-    if (!reducedMotion.matches) {
-      transition = byId("stop").animate(
-        [{ opacity: .3, transform: "translateY(7px)" }, { opacity: 1, transform: "translateY(0)" }],
-        { duration: 310, easing: "cubic-bezier(.2,.75,.22,1)" }
-      );
-    }
-  }
+}
+
+function scheduleViewport() {
+  if (!viewportFrame) viewportFrame = requestAnimationFrame(updateViewport);
+}
+
+function goTo(target, smooth = false) {
+  if (!target) return;
+  target.scrollIntoView({ block: "start", behavior: smooth && !reducedMotion.matches ? "smooth" : "instant" });
+  target.querySelector("h1, h2, h3, h4")?.focus({ preventScroll: true });
+}
+
+function showHash() {
+  goTo(byId(location.hash.slice(1)));
+}
+
+function handleChapterKey(event) {
+  if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey ||
+      (event.target instanceof Element && event.target.closest("button, input, select, textarea, [contenteditable]"))) return;
+  const forward = event.key === "ArrowDown" || (event.code === "Space" && !event.shiftKey);
+  const backward = event.key === "ArrowUp" || (event.code === "Space" && event.shiftKey);
+  if (!forward && !backward) return;
+  // Horizontal evidence tables keep native arrow scrolling when focused.
+  if (event.target instanceof Element && event.target.closest(".method-table")) return;
+  const target = chapters[chapterIndex() + (forward ? 1 : -1)];
+  if (!target) return;
+  event.preventDefault();
+  if (event.repeat) return;
+  if (location.hash !== "#" + target.id) history.pushState(null, "", "#" + target.id);
+  goTo(target, true);
 }
 
 async function loadReplay() {
   try {
     const response = await fetch("/api/replay");
     if (!response.ok) throw new Error();
-    snapshot = await response.json();
-    byId("replay-status").textContent = "Seed " + snapshot.seed + " · DE / Mobile / Stripe";
-    const dashboard = byId("dashboard-link");
-    dashboard.href = snapshot.dashboard;
-    dashboard.hidden = false;
-    render();
+    const data = await response.json();
+    const rendered = steps.map((step) => renderChapter(step, data));
+    byId("story").append(...rendered);
+    chapters = [byId("landing"), ...rendered];
+    byId("replay-status").textContent = "Seed " + data.seed + " · DE / Mobile / Stripe";
+    byId("begin").hidden = false;
+    byId("keyboard-guide").hidden = false;
+    if (location.hash) requestAnimationFrame(showHash);
+    scheduleViewport();
   } catch {
     byId("replay-status").textContent = "Recorded replay unavailable";
   }
 }
 
-window.addEventListener("hashchange", () => render(true));
-render();
+window.addEventListener("hashchange", showHash);
+window.addEventListener("scroll", scheduleViewport, { passive: true });
+window.addEventListener("resize", scheduleViewport);
+document.addEventListener("keydown", handleChapterKey);
 loadReplay();
