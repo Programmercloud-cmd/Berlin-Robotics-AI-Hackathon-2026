@@ -107,19 +107,28 @@ class DevinReasoner:
                     content = json.dumps({"turn": turn, **context, "previous_turns": turns}, default=str)
                     reused = False
                     if path:
-                        followup = client.post(path + "/messages", json={"message": system + "\n" + content})
-                        if followup.status_code in {401, 403, 404, 409, 410}:
+                        # The session already has the initial context and the earlier reads.
+                        latest = json.dumps({"turn": turn, "evidence": turns[-1]["evidence"]}, default=str)
+                        followup = client.post(path + "/messages", json={
+                            "message": "Here are Eye's latest results. Submit final structured output for "
+                                       f"turn {turn}. Turn 3 must contain a report and no queries.\n{latest}",
+                        })
+                        if not followup.is_success:
                             log.info("Devin investigation follow-up returned HTTP %s; opening a continuation.",
                                      followup.status_code)
                             continuations.append(f"new session (HTTP {followup.status_code})")
                             path = None
                         else:
-                            followup.raise_for_status()
                             reused = True
                             continuations.append("same session")
                     if not path:
                         path = start(content)
-                    answer = self._investigation_turn(client, path, turn)
+                    try:
+                        answer = self._investigation_turn(client, path, turn)
+                    except httpx.HTTPStatusError:
+                        if not reused:
+                            raise
+                        answer = None
                     if not answer and reused:
                         continuations[-1] = "new session (no follow-up output)"
                         path = start(content)
@@ -132,6 +141,8 @@ class DevinReasoner:
                         return answer, {"reasoning_provider": "devin", "reasoning_session_id": paths[-1],
                                         "reasoning_sessions": paths, "continuations": continuations}
                     turns.append({"request": answer, "evidence": results})
+            except httpx.HTTPStatusError as exc:
+                log.warning("Devin graph investigation failed (HTTP %d)", exc.response.status_code)
             except (httpx.HTTPError, ValueError, KeyError) as exc:
                 log.warning("Devin graph investigation failed (%s)", type(exc).__name__)
             finally:

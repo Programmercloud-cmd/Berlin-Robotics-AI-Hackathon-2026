@@ -33,6 +33,9 @@ Cite supplied E-prefixed evidence IDs in the report. If reads returned evidence,
 Include a plausible alternative, what weakens it, and the evidence IDs for that comparison. When the
 evidence cannot test an alternative, say so. Distinguish event counts from unique entities, delayed
 visibility from workflow failure, and symptoms from causes. Report the scope the evidence supports.
+For a ratio, compare outcomes per eligible entity. Compare matched, unaffected scopes where available.
+An increase in both totals does not establish that increased intake caused a drop in completion rate.
+Attribute samples to the sampled records and distinguish arithmetic contributions from causal evidence.
 Keep raw event IDs out of the prose. Never infer hosting or engineering causes without direct evidence.
 State why you stopped and which uncertainty remains. Avoid invented facts or quantities."""
 
@@ -175,7 +178,8 @@ def read_query(dsn, snapshot, read):
                               aligned_to=start, limit=4, **args)
             if read.tool == "decompose_metric":
                 return decompose_metric(definitions[read.target]["calculation"], latest, historical)
-            return {"latest": latest, "aligned_reference": historical}
+            previous = tool("metric_readings", start=start - HOUR, end=start - HOUR + CADENCE, limit=1, **args)
+            return {"latest": latest, "aligned_reference": historical, "previous_hour": previous}
         if read.tool == "metric_breakdown":
             return tool(read.tool, metric_id=read.target, window_start=start, as_of=cutoff, scope=scope, limit=14)
         known = {item["id"].removeprefix("activity:") for item in snapshot["graph"]["nodes"]
