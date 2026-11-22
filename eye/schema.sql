@@ -123,6 +123,16 @@ create table if not exists pending_reports (
     fallback jsonb not null
 );
 
+create table if not exists report_snapshots (
+    incident_id bigint not null references incidents(id),
+    phase text not null,
+    report jsonb not null,
+    telemetry jsonb not null,
+    observed_through timestamptz,
+    written_at timestamptz not null default clock_timestamp(),
+    primary key (incident_id, phase)
+);
+
 create table if not exists evidence (
     id bigint generated always as identity primary key,
     incident_id bigint not null references incidents(id),

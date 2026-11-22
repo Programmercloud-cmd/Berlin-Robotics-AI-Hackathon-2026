@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eye of the System · Benchmark</title>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/theme.css">
+  <link rel="stylesheet" href="/static/lab.css">
+  <script defer src="/static/benchmark.js"></script>
+</head>
+<body>
+  <header class="app-bar">
+    <div class="shell app-bar-row">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Eye of the System</div>
+      <h1 class="app-bar-title">Benchmark</h1>
+      <div class="app-bar-tools">
+        <nav aria-label="Local views"><a href="/">Test lab</a></nav>
+        <button class="theme-toggle" type="button" hidden>Use dark theme</button>
+      </div>
+    </div>
+  </header>
+  <main class="shell">
+    <section class="panel" aria-labelledby="scores">
+      <div class="workflow-heading">
+        <h2 id="scores">Scoreboard</h2>
+        <button id="benchmark-start" type="button" disabled>Run benchmark</button>
+      </div>
+      <p id="benchmark-status" role="status">Checking the checkout.</p>
+      <p id="benchmark-error" role="alert" hidden></p>
+      <div class="workflow-table">
+        <table>
+          <thead><tr><th scope="col">Run</th><th scope="col">Commit</th><th scope="col">Suite and seed</th><th scope="col">Eye reasoning</th><th scope="col">Cases</th><th scope="col">Fault cases alerted</th><th scope="col">False incidents</th><th scope="col">Incidents</th><th scope="col">Reviews</th></tr></thead>
+          <tbody id="benchmark-runs"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="panel benchmark-results" id="benchmark-results" aria-labelledby="benchmark-results-title" hidden>
+      <h2 id="benchmark-results-title">Case results</h2>
+      <p id="benchmark-run-meta"></p>
+      <div id="benchmark-cases"></div>
+    </section>
+  </main>
+</body>
+</html>

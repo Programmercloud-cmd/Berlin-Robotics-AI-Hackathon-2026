@@ -45,7 +45,7 @@ def traffic_cycle(start):
 
 
 def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disruption=False,
-         patterned=False, scenario=None, scenarios=(), staged=False):
+         patterned=False, scenario=None, scenarios=(), staged=False, inventory_depletion=0, storefront_loss=0):
     start = start.astimezone(timezone.utc)
     clock = int(start.timestamp())
     rng = Random(f"{seed}:{clock}")
@@ -67,6 +67,11 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
         if stock.get(sku, 0) < 50:
             stock[sku] = rng.randint(65, 95)
 
+    depleted = []
+    if inventory_depletion:
+        depletion = Random(f"{seed}:{clock}:inventory-depletion")
+        depleted = [sku for sku in PRODUCTS if depletion.random() < inventory_depletion]
+        stock.update(dict.fromkeys(depleted, 0))
     opening_stock = stock.copy()
     sales = defaultdict(list)
     feed = []
@@ -101,6 +106,10 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
     def completion_blocked(transition, attrs):
         probability = severity(transition, attrs, "reduce_completions")
         return probability is not None and completion_rng.random() < probability
+
+    for sku in depleted:
+        add_event("inventory_snapshot", timedelta(), {"sku": sku, "available_units": 0, **ALL_PRODUCTS[sku]},
+                  [(sku, "product")], Random(f"{seed}:{clock}:{sku}:stock-reading"))
 
     volume = round(600 * seasonal * traffic)
     for index in range(volume):
@@ -248,11 +257,21 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
         add_event("inventory_snapshot", timedelta(minutes=59),
                   {"sku": sku, "available_units": units, **ALL_PRODUCTS[sku]}, [(sku, "product")])
 
+    expected_events = len(events)
+    manifest = Counter((row[2].replace(second=0, microsecond=0), row[5].obj["source_id"], row[1])
+                       for row in events)
+    if storefront_loss:
+        delivery = Random(f"{seed}:{clock}:storefront-delivery")
+        dropped = {row[0] for row in events if row[5].obj["source_id"] == "storefront"
+                   and delivery.random() < storefront_loss}
+        events = [row for row in events if row[0] not in dropped]
+        links = [row for row in links if row[0] not in dropped]
+
     window = db.execute(
         """insert into windows (start_at, end_at, expected_events, observation_snapshot, published_through)
            values (%s, %s, %s, %s, %s)
            on conflict (start_at) do nothing returning start_at""",
-        (start, start + HOUR, len(events), start + HOUR + GRACE, start if staged else None),
+        (start, start + HOUR, expected_events, start + HOUR + GRACE, start if staged else None),
     ).fetchone()
     if not window:
         return
@@ -266,8 +285,6 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
             with cursor.copy(f"copy {table} from stdin") as copy:
                 for row in data:
                     copy.write_row(row)
-        manifest = Counter((row[2].replace(second=0, microsecond=0), row[5].obj["source_id"], row[1])
-                           for row in events)
         with cursor.copy("copy source_manifests from stdin") as copy:
             for (minute, source, activity), count in manifest.items():
                 copy.write_row((start, minute, source, activity, count))

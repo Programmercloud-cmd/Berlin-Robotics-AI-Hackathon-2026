@@ -53,6 +53,14 @@ Each incident card shows the first measured workflow break, scope, completion ra
 
 Run `python -m eye check --with-search` for the payment and search regressions in local PostgreSQL. Run `python -m unittest discover -s tests -p test_incident_grouping.py` to reproduce the cart-only and concurrent cart/payment cases.
 
+## Benchmark
+
+Commit the code and start the lab from a clean checkout with `DEVIN_API_KEY` and `DEVIN_ORG_ID` set. Open [Benchmark](http://127.0.0.1:8002/benchmark) and click **Run benchmark**. The same SHA can run again. Eye uses the model settings from the lab launch. To benchmark statistical reports with Devin as the reviewer, leave `EYE_MODEL` and `MODEL_NAME` unset. The reviewer uses its own Devin session.
+
+Suite v1 runs ten seed-42 cases. Each case starts from an isolated copy of the same historical baseline, applies one hour of traffic or a fault, and follows it with three hours of normal traffic. Detection time is measured from the case start to Eye’s first alert. Recovery time is measured from the case end until all its incidents recover. The scoreboard displays any incidents in the two benign cases as false incidents. Case details show the actual alert, the incidents, and separate Devin verdicts for the initial report and deeper findings, with the captured telemetry for each phase.
+
+The runner executes an archive of the recorded SHA. Scoreboard records and local logs are kept in `.runtime/benchmarks/` across lab restarts. Open the SHA link to read the local Git commit, or the run link to read case results. The Benchmark view and review rubrics are served by the Test Lab.
+
 ## Live reasoning
 
 Run `EYE_MODEL=codex python -m eye lab` to use an authenticated Codex CLI on your PATH. To use an OpenAI-compatible JSON chat completions provider, copy [the environment example](.env.example) to `.env` and set `MODEL_NAME`, `MODEL_API_KEY` and, if applicable, `MODEL_BASE_URL`. With no reachable provider, graph curation uses the registered calculations and the investigator produces a statistical report. The report records which reasoning path ran.

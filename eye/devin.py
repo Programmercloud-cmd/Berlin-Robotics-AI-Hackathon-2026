@@ -21,6 +21,7 @@ REPORT_FIELDS = {
 RELATION_FIELDS = {
     "target": TEXT, "kind": {"enum": ["measures", "depends_on", "may_influence"]}, "reason": TEXT,
 }
+VERDICT = {"enum": ["supported", "partial", "unsupported", "insufficient"]}
 
 
 def object_schema(fields):
@@ -33,6 +34,12 @@ def object_schema(fields):
 ROLES = {
     "scenario": ("test lab scenario", ScenarioReply.model_json_schema()),
     "investigation": ("incident investigation", object_schema(REPORT_FIELDS)),
+    "benchmark_review": ("benchmark report review", object_schema({
+        "reviews": {"type": "array", "items": object_schema({
+            "id": TEXT, "observable_break": VERDICT, "scope": VERDICT, "evidence": VERDICT,
+            "unsupported_claims": {"type": "array", "items": TEXT}, "notes": TEXT,
+        })},
+    })),
     "curation": ("graph curation", object_schema({
         "relationships": {
             "type": "array", "maxItems": 8, "items": object_schema(RELATION_FIELDS),

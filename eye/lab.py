@@ -16,11 +16,12 @@ from threading import Event, Lock, Thread
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from eye import benchmark
 from eye.db import connect, setup, state
 from eye.lab_results import evaluate, workflow_readings
 from eye.model import configured_devin
@@ -288,6 +289,33 @@ def make_lab_app(eye_port=8000):
     @app.get("/", include_in_schema=False)
     def index():
         return FileResponse(assets / "index.html")
+
+    @app.get("/benchmark", include_in_schema=False)
+    def benchmark_page():
+        return FileResponse(assets / "benchmark.html")
+
+    @app.get("/api/benchmarks")
+    def benchmark_scoreboard():
+        return {"checkout": benchmark.checkout(), "runs": benchmark.scoreboard()}
+
+    @app.post("/api/benchmarks", status_code=202, dependencies=[Depends(local_action)])
+    def start_benchmark():
+        try:
+            return {"id": benchmark.start()}
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @app.get("/api/benchmarks/commits/{sha}", response_class=PlainTextResponse)
+    def get_benchmark_commit(sha: str):
+        if commit := benchmark.read_commit(sha):
+            return commit
+        raise HTTPException(404, "Commit unavailable in this checkout.")
+
+    @app.get("/api/benchmarks/{identifier}")
+    def get_benchmark_run(identifier: str):
+        if run := benchmark.read_run(identifier):
+            return run
+        raise HTTPException(404, "Benchmark run not found.")
 
     @app.get("/theme.css", include_in_schema=False)
     def theme():

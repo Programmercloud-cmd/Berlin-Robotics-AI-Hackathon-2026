@@ -166,7 +166,7 @@ def interval_readings(definition, facts):
                     readings(definition, events, facts.by_activity, expected))
 
 
-def materialize_rolling(db, start, baseline):
+def materialize_rolling(db, start, baseline, *, history_only=False):
     dates = aligned_history(start, baseline)
     definitions = db.execute(
         "select * from metrics where direction <> 'none' or %s",
@@ -184,7 +184,7 @@ def materialize_rolling(db, start, baseline):
         ).fetchall():
             known_scopes[row["metric_id"]].add(tuple(sorted(row["scope"].items())))
     values, loaded = [], {}
-    for beginning in [*dates, start]:
+    for beginning in dates if history_only else [*dates, start]:
         historical = beginning != start
         needed = [m for m in definitions if not historical or
                   (m["direction"] != "none" and (beginning, m["id"]) not in cached)]

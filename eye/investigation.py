@@ -41,6 +41,16 @@ def metric_node(metric_id):
     return f"metric:{metric_id}"
 
 
+def save_report_snapshot(db, incident, phase, report, telemetry, cutoff):
+    db.execute(
+        """insert into report_snapshots (incident_id, phase, report, telemetry, observed_through)
+           values (%s, %s, %s, %s, %s) on conflict (incident_id, phase) do update
+           set report = excluded.report, telemetry = excluded.telemetry,
+               observed_through = excluded.observed_through, written_at = excluded.written_at""",
+        (incident, phase, jsonb(report), jsonb(telemetry), cutoff),
+    )
+
+
 def add_evidence(db, incident_id, start, kind, payload, node_id=None):
     return db.execute(
         """insert into evidence (incident_id, window_start, kind, node_id, payload)
@@ -252,6 +262,9 @@ def finish_next_report(dsn, model, stop):
             return False
         db.execute("update incidents set report = report || %s where id = %s",
                    (jsonb(report), job["incident_id"]))
+        context = job["context"]
+        cutoff = (context.get("context", {}).get("window") or {}).get("observation_snapshot")
+        save_report_snapshot(db, job["incident_id"], "initial", report, context, cutoff)
         db.execute("delete from pending_reports where incident_id = %s", (job["incident_id"],))
         return True
 
@@ -308,6 +321,7 @@ def finish_next_branch(dsn, stop):
         fields = {"evidence_branches": branches, "deep_investigation": "complete",
                   "branch_waits_for_receipts": watch_receipts, "branch_observed_through": observed_through}
         db.execute("update incidents set report = report || %s where id = %s", (jsonb(fields), incident["id"]))
+        save_report_snapshot(db, incident["id"], "deeper", fields, [details for _, details in findings], observed_through)
         return True
 
 
@@ -420,6 +434,9 @@ def open_incident(db, tool, start, baseline, anchor, alerts, model, completion=N
     if anchor.get("observed_at"):
         report["observation_window"] = {key: anchor[key] for key in ("window_start", "window_end", "observed_at")}
     db.execute("update incidents set report = %s where id = %s", (jsonb(report), incident_id))
+    if not model:
+        cutoff = (context["context"].get("window") or {}).get("observation_snapshot")
+        save_report_snapshot(db, incident_id, "initial", report, context, cutoff)
     attach_alerts(db, incident_id, start, [row for row in alerts if row["id"] != anchor.get("id")],
                   "related anomaly")
     return incident_id

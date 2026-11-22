@@ -67,6 +67,11 @@ dl { display: grid; grid-template-columns: minmax(7.3rem, max-content) minmax(0,
 dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; }
 #error { position: fixed; right: 1rem; bottom: 1rem; max-width: min(32rem, calc(100vw - 2rem)); padding: .75rem 1rem; border: 1px solid var(--danger); border-radius: .4rem; background: var(--surface); color: var(--danger); }
+.benchmark-results { margin-top: 1rem; }
+.benchmark-results article { padding: .85rem 0; border-top: 1px solid var(--line); }
+.benchmark-results pre { max-height: 24rem; margin-bottom: 0; padding: .65rem; overflow: auto; background: var(--field); white-space: pre-wrap; overflow-wrap: anywhere; }
+.benchmark-review { padding: .55rem .7rem; margin-top: .55rem; background: var(--field); border-radius: .35rem; }
+#benchmark-error { color: var(--danger); }
 @media (max-width: 48rem) { .workbench, .workflow-details { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 34rem) {
   .shell { width: calc(100% - 1.5rem); }
