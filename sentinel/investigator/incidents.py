@@ -45,6 +45,7 @@ class IncidentManager:
         self.last_seen: dict[str, pd.Timestamp] = {}
         self.alerted: set[str] = set()
         self.merged: dict[str, str] = {}        # merged incident -> the incident it was merged into
+        self.soft: set[str] = set()              # v4.1: P2 soft alerts (investigated, not paged)
 
     # ------------------------------------------------------------------ anomalies -> incidents
     def handle(self, anomalies: list[dict], now) -> list[str]:
@@ -248,6 +249,85 @@ class IncidentManager:
         inc.state = "investigating"
         return inc
 
+    # ------------------------------------------------------------------ v4.1: RiskLoc gate and P2 soft alerts
+    GATE_Z, GATE_EP = 4.0, 0.5
+
+    def _gate_on(self) -> bool:
+        return self.mon.features.get("calibrate", True) and self.mon.features.get("gate", True)
+
+    def _gate(self, inc: Incident) -> tuple[bool, str]:
+        """Does a localised, significant pattern back this incident? (1) a RiskLoc clue from the monitor,
+        (2) RiskLoc run now on the first cause over the incident window, or (3) the investigation already
+        localised the change to a slice whose control tests are confined. Written as an evidence record."""
+        from sentinel.riskloc import riskloc
+        case = self.cases[inc.id]
+        clues = [c for c in (case.notes.get("riskloc") or [])
+                 if c.get("z", 0) >= self.GATE_Z and c.get("explanatory_power", 0) >= self.GATE_EP]
+        why, ok = "", False
+        if clues:
+            c = clues[0]
+            ok, why = True, (f"RiskLoc clue {seg_key(c['segment'])} explains {c['explanatory_power']:.0%} "
+                             f"(z={c['z']:.1f})")
+        if not ok and self.mon.features.get("riskloc", True) and inc.first_cause in self.g.nodes:
+            node = self.g.nodes[inc.first_cause]
+            seg = parse_seg(inc.segment)
+            dims = [d for d in node.dimensions if d not in seg][:4]
+            if node.kind in ("count", "ratio", "sum") and len(dims) >= 2:
+                try:
+                    leaves = self.mon.forecaster.leaves(inc.first_cause, list(seg) + dims, case.start, case.end)
+                    if seg:
+                        for k, v in seg.items():
+                            leaves = leaves[leaves[k].astype(str) == str(v)]
+                    res = riskloc(leaves, dims, phi=self.mon.calibration["phi"].get(inc.first_cause, 1.0))
+                    strong = [c for c in res.get("causes", []) if c.get("z", 0) >= self.GATE_Z
+                              and c.get("explanatory_power", 0) >= self.GATE_EP]
+                    if strong:
+                        ok, why = True, (f"RiskLoc on {inc.first_cause}: {seg_key(strong[0]['segment'])} explains "
+                                         f"{strong[0]['explanatory_power']:.0%} (z={strong[0]['z']:.1f})")
+                    else:
+                        why = (f"RiskLoc on {inc.first_cause} found no localised pattern "
+                               f"({res.get('abnormal_leaves', 0)} abnormal of {res.get('leaves', 0)} leaves)")
+                except Exception as ex:                                   # noqa: BLE001 - gate is best effort
+                    why = f"RiskLoc could not run ({type(ex).__name__})"
+        if not ok:
+            confined = [e for e in case.evidence if e.signal == "control_test" and e.verdict == "confined"]
+            keys = set(parse_seg(inc.segment))
+            if keys and {e.params.get("key") for e in confined} >= keys:
+                ok, why = True, f"localised to {inc.segment} with confined control tests"
+        why = why or "no localised pattern and no confined slice"
+        self.inv.record(case, "localise", "gate", f"gate({inc.first_cause}, {inc.segment or 'total'})", why,
+                        {"passed": int(ok)}, signal="gate", verdict="pass" if ok else "fail")
+        return ok, why
+
+    def _soften(self, inc: Incident, why: str):
+        """P2: investigated and kept under watch, not paged; promoted when the gate passes later."""
+        inc.state = "monitoring"
+        first = inc.id not in self.soft
+        self.soft.add(inc.id)
+        if first:
+            self.bus.publish("SOFT_ALERT", "incidents", {"id": inc.id, "level": "P2", "label": inc.label,
+                                                         "first_cause": inc.first_cause, "segment": inc.segment,
+                                                         "why": f"RiskLoc gate not passed: {why}"}, inc.id)
+            self.bus.publish("INCIDENT_UPDATED", "incidents", {
+                "id": inc.id, "state": "monitoring", "label": inc.label, "level": "P2",
+                "why": f"P2 soft alert: no supported cause and {why}; kept under watch, not paged",
+                "report_md": inc.report_md}, inc.id)
+
+    def _promote(self, inc: Incident, now):
+        """A P2 incident that new symptoms joined is re-checked; passing the gate pages it (P1)."""
+        ok, why = self._gate(inc)
+        if not ok:
+            return
+        self.soft.discard(inc.id)
+        inc.state = "alerted"
+        self.alerted.add(inc.id)
+        inc.report_md += f"\n\n**Promoted P2 -> P1** at {now}: {why}."
+        signed = self.cases[inc.id].notes.get("impact", {}).get("contribution_eur_per_h", 0.0)
+        self.bus.publish("FINAL_REPORT", "incidents", {"id": inc.id, "kind": "alert", "label": inc.label,
+                                                       "first_cause": inc.first_cause, "segment": inc.segment,
+                                                       "impact_eur_per_h": abs(signed), "promoted": True,
+                                                       "report_md": inc.report_md}, inc.id)
+
     def _escalate(self, inc: Incident, now, cause: str):
         """An incident first seen through a harmless symptom (e.g. CTR up) is re-judged when harmful symptoms
         of the same root cause join it: the incident is alerted on its net business harm."""
@@ -264,6 +344,11 @@ class IncidentManager:
         if not new:
             return
         harm = min(0.0, min(a.impact_eur_per_h for a in new))     # worst single new symptom, never a sum
+        if harm <= -ALERT_MIN_EUR_PER_H and self._gate_on() and inc.label != "supported_cause":
+            ok, why = self._gate(inc)
+            if not ok:
+                self._soften(inc, why)
+                return
         if harm <= -ALERT_MIN_EUR_PER_H:
             inc.state = "alerted"
             self.alerted.add(inc.id)
@@ -283,6 +368,10 @@ class IncidentManager:
 
     def _attach(self, inc: Incident, a: dict, now, quiet: bool = False):
         inc.anomalies.append(self._anom(a))
+        if inc.id in self.soft and self._gate_on():
+            if a.get("clues"):
+                self.cases[inc.id].notes.setdefault("riskloc", []).extend(a["clues"])
+            self._promote(inc, now)
         self._escalate(inc, now, f"symptom {a['metric']} [{a['segment'] or 'total'}]")
         inc.updated_at = now
         self.last_seen[inc.id] = now
@@ -390,7 +479,15 @@ class IncidentManager:
                        f"cause): same slice and hour, no cause of its own; not paged separately",
                 "report_md": inc.report_md}, inc.id)
             return
-        if inc.label in ("supported_cause", "hypothesis", "unexplained") and signed <= -ALERT_MIN_EUR_PER_H                 and not unconfirmed:
+        if inc.label in ("supported_cause", "hypothesis", "unexplained") and signed <= -ALERT_MIN_EUR_PER_H \
+                and not unconfirmed and self._gate_on() and inc.label != "supported_cause":
+            ok, why = self._gate(inc)
+            if not ok:
+                self._soften(inc, why)
+                return
+            inc.report_md += f"\n\n**Paged after the RiskLoc gate:** {why}."
+        if inc.label in ("supported_cause", "hypothesis", "unexplained") and signed <= -ALERT_MIN_EUR_PER_H \
+                and not unconfirmed:
             inc.state = "alerted"
             self.alerted.add(inc.id)
             self.bus.publish("FINAL_REPORT", "investigator", {"id": inc.id, "kind": "alert", "label": inc.label,

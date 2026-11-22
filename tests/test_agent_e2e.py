@@ -152,3 +152,17 @@ def test_running_campaign_is_not_ended_early(rt):
     camp = next(e for e in rt.data.events(pd.Timestamp("2026-10-26"), rt.data.now) if e.type == "campaign")
     assert rt.monitor.planned_end(camp) is None
     assert not rt.bus.of_type("PLANNED_EFFECT_ENDED")
+
+
+# ---------------------------------------------------------------- v4.1: RiskLoc gate and P2 soft alerts
+def test_unsupported_pages_passed_the_gate(rt):
+    """Every page without a supported cause has a passed gate record; every P2 has a failed one."""
+    for e in rt.bus.of_type("FINAL_REPORT"):
+        if e.payload["kind"] != "alert" or e.payload["label"] == "supported_cause":
+            continue
+        case = rt.incidents.cases[e.incident_id]
+        assert any(ev.signal == "gate" and ev.verdict == "pass" for ev in case.evidence), e.incident_id
+    for iid in rt.incidents.soft:
+        case = rt.incidents.cases[iid]
+        assert any(ev.signal == "gate" and ev.verdict == "fail" for ev in case.evidence), iid
+        assert iid not in rt.incidents.alerted

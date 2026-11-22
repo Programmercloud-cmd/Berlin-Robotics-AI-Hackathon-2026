@@ -57,7 +57,11 @@ CONFIGS = {"v1": {"scan": False, "riskloc": False, "process": False, "learning":
            "v1+bfs": {"scan": False, "riskloc": False, "process": False, "learning": False, "bfs": True,
                       "calibrate": False},
            # v4: v3 + data profile and calibration (dispersion, planned-effect end, target harm, slow harm)
-           "v4": {"scan": True, "riskloc": True, "process": True, "learning": True, "bfs": True, "calibrate": True}}
+           "v4": {"scan": True, "riskloc": True, "process": True, "learning": True, "bfs": True, "calibrate": True,
+                  "gate": False},
+           # v4.1: v4 + RiskLoc gate before paging, P2 soft alerts, business context for underspend
+           "v4.1": {"scan": True, "riskloc": True, "process": True, "learning": True, "bfs": True, "calibrate": True,
+                    "gate": True}}
 DEFAULT_SCENARIOS = ["autumn_campaign", "late_partition", "android_payment_de", "ios_release", "for_you_model_shift"]
 
 

@@ -791,6 +791,13 @@ class Investigator:
             tseg = {k: v for k, v in case.seg.items() if k in self.g.nodes[t].dimensions}
             tw = self.tools.window_dev(t, tseg, case.start, case.end)
             if np.isfinite(tw.get("actual", np.nan)) and abs(tw.get("z", 0.0)) >= 3 and tw.get("volume"):
+                if self.mon.features.get("gate", True) and tw["actual"] < tw["expected"]:
+                    # underspend only matters when there was budget to spend: at night the plan is tiny
+                    typical = self.mon.baseline(t, tseg).overall_den
+                    if typical and tw["volume"] / max(hours, 1) < 0.5 * typical:
+                        out["target_context"] = (f"{t} below plan, but planned volume {tw['volume'] / max(hours, 1):,.0f}"
+                                                 f"/h is under half its usual {typical:,.0f}/h: not harm")
+                        continue
                 harm = abs(tw["actual"] - tw["expected"]) * tw["volume"]          # e.g. EUR over / under plan
                 out["target_harm"] = {"metric": t, "segment": fmt_seg(tseg), "eur_total": harm,
                                       "eur_per_h": harm / hours, "actual": tw["actual"], "expected": tw["expected"]}

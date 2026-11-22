@@ -104,3 +104,41 @@ Every change is behind the feature flag `calibrate` (on in v4, off in v1-v3), so
   Devin's framing was correct (symptoms, DE / mobile, noise, Frankfurt left unverified); the entry choice has
   since been fixed to the most upstream confirmed symptom, and a run that reuses a cached framing still
   returns no incident - not yet resolved. Only used with `--frame-text`; it does not affect v1-v4 results.
+
+## 5. v4.1: RiskLoc gate, P2 soft alerts, business context for underspend
+
+Goal: trade false alarms for nothing in recall ("catch generously, but every suspect without a cause of its
+own passes a RiskLoc check before it pages"). Feature flag `gate` (on in v4.1, off in v4).
+
+- **RiskLoc gate.** An incident without its own supported cause (label `unexplained` / `hypothesis`), or one
+  escalated from a minor event, pages only if (1) a RiskLoc clue explains >= 50 % of the change with z >= 4,
+  (2) RiskLoc run on the first cause over the incident window finds such a pattern, or (3) the investigation
+  localised it to a slice with confined control tests. Every gate decision is an evidence record.
+- **P2 soft alerts.** An incident that fails the gate is investigated and watched (`SOFT_ALERT`, level P2) but
+  not paged; when new symptoms join it, the gate is re-checked and a pass promotes it to P1.
+- **Business context for target metrics.** Underspend on a target metric (pacing) is harm only when the
+  planned volume is at least half its usual level (at night a tiny plan explains a low spend). Overspend is
+  unchanged.
+
+### Result on the own data (3 scenarios)
+
+| metric | v4 | v4.1 |
+|---|---|---|
+| precision | 76% | 76% |
+| recall | 100% | 100% |
+| false alarm rate | 2% | 2% |
+| top-1 root cause | 100% | 100% |
+| label accuracy | 83% | 83% |
+| alerts | 15 | 15 |
+| suite wall time | 470 s | 496 s |
+
+v4.1 changes nothing measurable on this data. The gate softened one unexplained average-order-value page
+to P2 (es-web, 10-26 21:00), but a second one appeared at 10-27 13:00. The remaining false alarms (orders
+in PL, in-stock in toys, payment success in FR / iOS / home) are localised slices with confined controls,
+so they pass the gate by design. The gate targets noise without structure (it helped on the benchmark-style
+cases where unexplained totals paged); precision on this data needs a different lever, e.g. requiring
+persistence for single-hour slice anomalies, or the incident score / precision-recall sweep described in
+the tuning notes. Shoply and the Eye benchmark were not re-run for v4.1.
+
+The suite wall time is back to about 470 s (it had grown to 920 s; fixed by caching graph distances and a
+vectorised RiskLoc fallback).

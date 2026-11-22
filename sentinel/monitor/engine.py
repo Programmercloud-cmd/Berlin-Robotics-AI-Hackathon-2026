@@ -48,7 +48,8 @@ KEY_METRICS = ["contribution", "gmv", "orders", "conversion_rate", "payment_succ
 SCAN_FDR_Q, SCAN_PHI, SCAN_MIN_REL = 1e-3, 2.0, 0.10
 DEFAULT_FEATURES = {"scan": True, "riskloc": True, "process": True, "learning": True,
                     "bfs": True,          # the investigator's pruned graph search (v3); off = greedy v2 walk
-                    "calibrate": True}    # data profile + calibration, planned-effect end, slow harm (v4)
+                    "calibrate": True,    # data profile + calibration, planned-effect end, slow harm (v4)
+                    "gate": True}         # v4.1: incidents without a supported cause page only past the RiskLoc gate
 
 
 def seg_from_key(key: str) -> dict:

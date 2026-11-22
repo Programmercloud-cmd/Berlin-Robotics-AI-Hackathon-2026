@@ -362,7 +362,7 @@ def review(results: list[dict], log) -> dict:
                 it["initial_report_id"] = it["initial_report_id"].replace(f"{r['id']}/", f"{r['id']}/eye-", 1)
             items.append(it)
         for x in r["sentinel"]["reports"]:
-            tag = f"sentinel_{r.get('config', 'v4')}".replace("+", "_")
+            tag = f"sentinel_{r.get('config', 'v4')}".replace("+", "_").replace(".", "_")
             items.append({"id": f"{r['id']}/{tag}-{x['incident_id']}/initial", "phase": "initial",
                           "report": x["report"], "telemetry": [
                               {k: e.get(k) for k in ("id", "signal", "entity", "interpretation", "verdict")}
@@ -405,7 +405,7 @@ def review_table(results: list[dict], rv: dict) -> str:
     for r in results:
         if "error" in r:
             continue
-        for sysname in ("eye", f"sentinel_{r.get('config', 'v4')}".replace("+", "_")):
+        for sysname in ("eye", f"sentinel_{r.get('config', 'v4')}".replace("+", "_").replace(".", "_")):
             if (r["id"], sysname) in systems:
                 continue
             systems.append((r["id"], sysname))
@@ -476,7 +476,7 @@ def main(argv=None):
                 seed_template(server.get_uri(database="benchmark_baseline"), a.seed)
             for case in cases:
               for cfg in configs:
-                database = f"case_{case[0]}_{cfg}".replace("+", "_")
+                database = f"case_{case[0]}_{cfg}".replace("+", "_").replace(".", "_")
                 with connect(server.get_uri()) as db:
                     db.commit()
                     db.autocommit = True
