@@ -1,0 +1,8 @@
+{
+  "effect": "payment_timeout",
+  "transition": "payment",
+  "scope": {"country": "DE", "platform": "mobile", "provider": "Stripe"},
+  "severity": 0.85,
+  "duration_hours": 2,
+  "premise": "Seed 42 rehearsal · Stripe timeout"
+}

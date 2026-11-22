@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eye of the System · Replay walkthrough</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="bar">
+    <div class="shell header-row">
+      <span class="brand"><span class="eye-mark" aria-hidden="true"></span> Eye of the System</span>
+      <a href="http://127.0.0.1:8001/" target="_blank" rel="noopener">Operator panel ↗</a>
+    </div>
+  </header>
+  <main class="shell">
+    <div class="intro">
+      <p class="context">Seed 42 · Germany · Mobile · Stripe</p>
+      <h1>Follow a payment timeout</h1>
+      <p id="replay-status" class="replay-status" role="status">Connecting to the Test Lab and Eye…</p>
+    </div>
+    <nav class="pipeline" aria-label="Replay pipeline">
+      <ol>
+        <li><a href="#telemetry">Telemetry</a></li>
+        <li><a href="#discovery">Discovery and graph</a></li>
+        <li><a href="#detection">Independent detection</a></li>
+        <li><a href="#registration">Live metric registration</a></li>
+        <li><a href="#recovery">Investigation and recovery</a></li>
+      </ol>
+    </nav>
+    <article class="stop" id="stop" aria-labelledby="stop-title">
+      <h2 id="stop-title" tabindex="-1">Telemetry</h2>
+      <p id="stop-summary"></p>
+      <p id="stop-guidance" class="guidance"></p>
+      <div id="facts" class="facts" hidden></div>
+      <div id="links" class="links"></div>
+    </article>
+    <nav class="controls" aria-label="Walkthrough steps">
+      <a id="previous" hidden>← Previous</a>
+      <span id="position"></span>
+      <a id="next">Next →</a>
+    </nav>
+  </main>
+</body>
+</html>
