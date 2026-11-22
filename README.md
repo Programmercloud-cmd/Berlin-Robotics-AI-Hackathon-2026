@@ -55,7 +55,7 @@ Run `python -m eye check --with-search` for the payment and search regressions i
 
 ## Benchmark
 
-Commit the code and start the lab from a clean checkout with `DEVIN_API_KEY` and `DEVIN_ORG_ID` set. Open [Benchmark](http://127.0.0.1:8002/benchmark) and click **Run benchmark**. The same SHA can run again. Eye uses the model settings from the lab launch. To benchmark statistical reports with Devin as the reviewer, leave `EYE_MODEL` and `MODEL_NAME` unset. The reviewer uses its own Devin session.
+Commit the code and start the lab from a clean checkout with `DEVIN_API_KEY` and `DEVIN_ORG_ID` set. Open [Benchmark](http://127.0.0.1:8002/benchmark) and click **Run benchmark**. The same SHA can run again. Eye uses the model settings from the lab launch. To benchmark statistical reports with Devin as the reviewer, set `EYE_MODEL=local` and leave `MODEL_NAME` unset. The reviewer uses its own Devin session.
 
 Suite v1 runs ten seed-42 cases. Each case starts from an isolated copy of the same historical baseline, applies one hour of traffic or a fault, and follows it with three hours of normal traffic. Detection time is measured from the case start to Eye’s first alert. Recovery time is measured from the case end until all its incidents recover. The scoreboard displays any incidents in the two benign cases as false incidents. Case details show the actual alert, the incidents, and separate Devin verdicts for the initial report and deeper findings, with the captured telemetry for each phase.
 
