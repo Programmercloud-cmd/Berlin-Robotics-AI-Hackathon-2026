@@ -1,9 +1,12 @@
 import unittest
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from eye.cohort_evidence import matched_cohorts, supports_link
 from eye.downstream_impact import assess, linked_steps
 from eye.shared_incidents import conflicting_step, source_plans
+from eye.transitions import Readings
 
 
 START = datetime(2026, 11, 22, 10, tzinfo=timezone.utc)
@@ -14,6 +17,33 @@ def event(identifier, activity, second, **attrs):
 
 
 class SharedEvidenceTest(unittest.TestCase):
+    def test_same_scope_attempt_volume_accounts_for_successes_once_receipts_arrive(self):
+        scope = {"payment_provider": "Stripe"}
+        key = tuple(scope.items())
+        target = {"metric_id": "successful_payments", "scope": scope}
+        readings = Readings.__new__(Readings)
+        readings.historic = [1, 2, 3]
+
+        def assessment(completed, *, eligible=144, pending=0):
+            readings.data = {"payment": ("payment_attempted", {key: (completed, eligible)}, {key: (662, 700)})}
+            attempts = [event(f"attempt-{i}", "payment_attempted", 0, payment_id=str(i), **scope)
+                        for i in range(eligible)]
+            outcomes = defaultdict(list)
+            for i in range(eligible - pending):
+                activity = "payment_succeeded" if i < completed else "payment_declined"
+                outcomes[activity].append(event(f"outcome-{i}", activity, 1, payment_id=str(i), **scope))
+            facts = SimpleNamespace(by_activity={"payment_attempted": attempts}, following=outcomes)
+            return assess((), "attempt_volume", target, readings, facts=facts)
+
+        self.assertEqual(assessment(133, pending=1)["status"], "provisional")
+        linked = assessment(133)
+        self.assertEqual(linked["status"], "linked")
+        self.assertAlmostEqual(linked["upstream_explained"], 84.5, places=1)
+        self.assertAlmostEqual(linked["unexplained"], 3.2, places=1)
+        self.assertEqual(assessment(11, eligible=12)["status"], "provisional")
+        self.assertEqual(assessment(130)["status"], "provisional")
+        self.assertEqual(assessment(75)["status"], "independent")
+
     def test_payment_completion_requires_matching_cart_order_and_payment(self):
         rows = [event("cart", "cart_added", 1), event("wrong-checkout", "checkout_started", 2, order_id="x"),
                 event("checkout", "checkout_started", 2, order_id="o"),

@@ -28,7 +28,7 @@ WORKFLOW = (
     Transition("cart_add", "Cart add completion", "cart_add_requested", "cart_added",
                "add_to_cart_sessions", ("product_view_sessions", "add_to_cart_sessions"), "cart_add_failed", "product_viewed"),
     Transition("checkout", "Checkout start", "cart_added", "checkout_started",
-               "checkout_sessions", ("add_to_cart_sessions", "checkout_sessions")),
+               "checkout_sessions", ("add_to_cart_sessions", "checkout_sessions"), "checkout_start_failed"),
     Transition("payment_attempt", "Payment initiation", "checkout_started", "payment_attempted",
                "payment_attempts", ("checkout_sessions", "payment_attempts")),
     Transition("payment", "Payment success", "payment_attempted", "payment_succeeded",

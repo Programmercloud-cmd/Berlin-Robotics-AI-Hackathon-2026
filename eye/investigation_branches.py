@@ -555,6 +555,9 @@ def build_branches(db, incident, cutoff, baseline):
     if window and kind in {"stock", "search"}:
         if branch := matched_branch(db, incident, start, cutoff, kind):
             branches.append(branch)
+    elif metric in SALES_SIGNALS:
+        branches.extend(sales_branches(db, start, incident["scope"], at_detection, history, rolling=bool(window)))
+    if window and (kind in {"stock", "search"} or metric == "payment_attempts"):
         for row in db.execute(
             """select decision from incident_relationships where parent_id=%s and observed_at <= %s
                order by incident_id""", (incident["id"], cutoff),
@@ -562,23 +565,26 @@ def build_branches(db, incident, cutoff, baseline):
             decision = row["decision"]
             caption = decision["reason"]
             status = decision["status"]
+            direct = decision["upstream"] == "attempt_volume"
             supports = [caption] if status == "linked" else []
+            unresolved = [caption] if status == "provisional" else []
             if "upstream_explained" in decision:
-                supports.append(f"Linked cohorts account for an estimated {decision['upstream_explained']:.1f} of "
+                measured = "Fewer attempts" if direct else "Linked cohorts"
+                supports.append(f"{measured} account for an estimated {decision['upstream_explained']:.1f} of "
                                 f"{decision['scope_volume_loss']:.1f} missing {decision['metric_id'].replace('_', ' ')}.")
                 if kind == "search":
                     supports.append(f"Fewer attempts at the historical completion rate account for "
                                     f"{decision['fewer_attempts_at_baseline_rate']:.1f} missing completions. "
                                     f"The change in completion per attempt accounts for "
                                     f"{decision['conditional_completion_loss']:.1f}.")
-                supports.append(f"Scoped completion was {decision['checked_completion_rate']:.1%} versus "
-                                f"{decision['baseline_completion_rate']:.1%} expected."
-                                if decision["checked_completion_rate"] is not None else "The comparison rate was unavailable.")
+                if decision["checked_completion_rate"] is not None:
+                    supports.append(f"Scoped completion was {decision['checked_completion_rate']:.1%} versus "
+                                    f"{decision['baseline_completion_rate']:.1%} expected.")
+                if direct:
+                    unresolved.append(f"An estimated {decision['unexplained']:.1f} successes remain unexplained, "
+                                      f"against expected variation of {decision['expected_variation']:.1f}.")
             branches.append(hypothesis(f"Downstream incident #{decision['incident_id']}", supports,
-                                       [caption] if status == "independent" else [],
-                                       [caption] if status == "provisional" else [], evidence=decision))
-    elif metric in SALES_SIGNALS:
-        branches.extend(sales_branches(db, start, incident["scope"], at_detection, history, rolling=bool(window)))
+                                       [caption] if status == "independent" else [], unresolved, evidence=decision))
     if not branches:
         branches.extend(upstream_branches(db, incident, start, at_detection, history, rolling=bool(window)))
     if not branches:

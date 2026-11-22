@@ -14,6 +14,9 @@ DEMO_START = datetime(2026, 11, 21, 9, tzinfo=timezone.utc)
 PAYMENT_SCOPE = {"country": "DE", "platform": "mobile", "provider": "Stripe"}
 SEARCH_SCOPE = {"country": "FR", "platform": "web"}
 SEGMENTS = list(product(("DE", "FR"), ("mobile", "web"), ("Stripe", "Adyen")))
+SEGMENT_WEIGHTS = (4, 1, 1, 1, 1, 1, 1, 1)
+VIEW_RATE, CART_RATE, CHECKOUT_RATE = .97, .83, .80
+TIMEOUT_RATE, DECLINE_RATE = .022, .012
 CATEGORIES = ("home", "outdoors", "electronics")
 PRODUCTS = {f"sku-{i:03}": {"category": CATEGORIES[i % 3], "price_cents": 1200 + 185 * i}
             for i in range(48)}
@@ -44,8 +47,17 @@ def traffic_cycle(start):
     return weekday * week, day
 
 
+def session_volume(start, seed, traffic=1.0, patterned=False):
+    seasonal = .9 + .15 * cos((start.hour - 14) * pi / 12)
+    if patterned:
+        cycle, _ = traffic_cycle(start)
+        seasonal *= cycle * Random(f"{seed}:{int(start.timestamp())}:traffic").uniform(.98, 1.02)
+    return round(600 * seasonal * traffic)
+
+
 def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disruption=False,
-         patterned=False, scenario=None, scenarios=(), staged=False, inventory_depletion=0, storefront_loss=0):
+         patterned=False, scenario=None, scenarios=(), staged=False, inventory_depletion=0, storefront_loss=0,
+         event_traffic=None):
     start = start.astimezone(timezone.utc)
     clock = int(start.timestamp())
     rng = Random(f"{seed}:{clock}")
@@ -89,10 +101,6 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
         links.extend((identifier, key, qualifier) for key, qualifier in references)
         return identifier
 
-    seasonal = 0.9 + 0.15 * cos((start.hour - 14) * pi / 12)
-    if patterned:
-        cycle, _ = traffic_cycle(start)
-        seasonal *= cycle * Random(f"{seed}:{clock}:traffic").uniform(0.98, 1.02)
     plans = (*scenarios, scenario) if scenario else scenarios
     effects = {plan.transition: (plan, plan.scope.model_dump(exclude_none=True)) for plan in plans}
 
@@ -111,13 +119,20 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
         add_event("inventory_snapshot", timedelta(), {"sku": sku, "available_units": 0, **ALL_PRODUCTS[sku]},
                   [(sku, "product")], Random(f"{seed}:{clock}:{sku}:stock-reading"))
 
-    volume = round(600 * seasonal * traffic)
-    for index in range(volume):
+    volume = session_volume(start, seed, traffic, patterned)
+    extra, promoted, promoted_weights = 0, (), ()
+    if event_traffic:
+        scope, multiplier = event_traffic
+        promoted, promoted_weights = zip(*[(segment, weight) for segment, weight in zip(SEGMENTS, SEGMENT_WEIGHTS)
+            if all(value == dict(zip(("country", "platform", "provider"), segment))[key] for key, value in scope.items())])
+        extra = round(volume * (multiplier - 1) * sum(promoted_weights) / sum(SEGMENT_WEIGHTS))
+    for index in range(volume + extra):
         # Lab journeys have independent draws. The fixed rehearsal keeps its established seed sequence.
         shopper_rng = Random(f"{seed}:{clock}:session:{index}") if patterned else rng
         base = f"{prefix}{index}:"
         session, cart, order, payment = (f"{base}{kind}" for kind in ("session", "cart", "order", "payment"))
-        country, platform, provider = shopper_rng.choices(SEGMENTS, weights=(4, 1, 1, 1, 1, 1, 1, 1))[0]
+        group, weights = (SEGMENTS, SEGMENT_WEIGHTS) if index < volume else (promoted, promoted_weights)
+        country, platform, provider = shopper_rng.choices(group, weights=weights)[0]
         channel = catalog_rng.choice(("direct", "organic", "paid_search", "display"))
         journey = {"country": country, "platform": platform, "acquisition_channel": channel,
                    "session_id": session}
@@ -171,7 +186,7 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
         if offer:
             feed.append((offer_time, *offer, journey, session_link, recommendation))
         add_event("product_page_requested", elapsed + timedelta(seconds=2), item, product_link, page_events_rng)
-        if shopper_rng.random() >= 0.97 or completion_blocked("product_view", journey):
+        if shopper_rng.random() >= VIEW_RATE or completion_blocked("product_view", journey):
             add_event("product_page_load_failed", elapsed + timedelta(seconds=5),
                       {**item, "http_status": 503}, product_link, page_events_rng)
             continue
@@ -181,7 +196,7 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
             add_event("product_viewed", elapsed + timedelta(seconds=13),
                       {**journey, "sku": viewed, **ALL_PRODUCTS[viewed]},
                       [*session_link, (viewed, "product")])
-        if shopper_rng.random() >= 0.83 or abandons:
+        if shopper_rng.random() >= CART_RATE or abandons:
             continue
         add_event("cart_add_requested", elapsed + timedelta(seconds=20), item, product_link, transition_events_rng)
         if completion_blocked("cart_add", journey):
@@ -191,7 +206,11 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
         add_object(cart, "cart", {})
         cart_links = [*product_link, (cart, "cart")]
         add_event("cart_added", elapsed + timedelta(seconds=22), item, cart_links)
-        if shopper_rng.random() >= 0.80 or not stock[sku]:
+        if shopper_rng.random() >= CHECKOUT_RATE or not stock[sku]:
+            continue
+        if completion_blocked("checkout", journey):
+            add_event("checkout_start_failed", elapsed + timedelta(seconds=37), {**item, "http_status": 503},
+                      cart_links, transition_events_rng)
             continue
         add_object(order, "order", {"sku": sku, "amount_cents": item["price_cents"]})
         add_object(payment, "payment", {"provider": provider})
@@ -201,13 +220,13 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
         add_event("checkout_started", elapsed + timedelta(seconds=37), commerce, order_links)
         add_event("payment_attempted", elapsed + timedelta(seconds=45), commerce, payment_links)
         payment_affected = fault and all(checkout[key] == value for key, value in PAYMENT_SCOPE.items())
-        timeout_rate = 0.63 if payment_affected else 0.022
+        timeout_rate = 0.63 if payment_affected else TIMEOUT_RATE
         timeout_rate = severity("payment", checkout, "payment_timeout") or timeout_rate
         outcome = shopper_rng.random()
         if outcome < timeout_rate:
             add_event("payment_timed_out", elapsed + timedelta(seconds=62),
                       {**commerce, "response": "gateway_timeout"}, payment_links)
-        elif outcome < timeout_rate + 0.012:
+        elif outcome < timeout_rate + DECLINE_RATE:
             add_event("payment_declined", elapsed + timedelta(seconds=47),
                       {**commerce, "response": "card_declined"}, payment_links)
         else:

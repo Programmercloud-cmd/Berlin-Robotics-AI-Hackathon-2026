@@ -10,12 +10,15 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
+from statistics import median
 from uuid import uuid4
 
-from eye.benchmark_cases import CASES, SUITE_VERSION
-from eye.model import configured_devin
+from eye.benchmark_cases import CASE_HOURS, CASES, SUITE_VERSION
+from eye.intervals import CADENCE, GRACE, HOUR
+from eye.model import configured_devin, configured_provider
 from eye.scenario import LAB_SEED
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,14 +45,33 @@ def checkout():
 
 
 def model_settings():
-    mode = os.getenv("EYE_MODEL")
-    name = os.getenv("MODEL_NAME")
-    provider = mode if mode in {"devin", "codex"} else "chat-completions" if name else "statistical"
-    return {"eye_provider": provider, "eye_model": name if provider == "chat-completions" else None,
+    provider = configured_provider()
+    return {"eye_provider": "statistical" if provider == "local" else provider,
+            "eye_model": os.getenv("MODEL_NAME") if provider == "chat-completions" else None,
             "reviewer": "devin", "devin_mode": os.getenv("DEVIN_MODE") or "organization default"}
 
 
-def start():
+@lru_cache(maxsize=128)
+def commit_subject(sha):
+    if re.fullmatch(r"[0-9a-f]{40}", sha):
+        try:
+            return git("show", "-s", "--format=%s", sha, "--").decode(errors="replace").strip()
+        except subprocess.CalledProcessError:
+            pass
+    return ""
+
+
+def run_context(run):
+    # The original v1 archives predate these fields.
+    if "commit_subject" not in run:
+        run["commit_subject"] = commit_subject(run["sha"])
+    if "methodology" not in run and run.get("version") == "1":
+        run["methodology"] = {"effect_hours": 1, "follow_up_hours": 3, "window_minutes": 60,
+                              "evaluation_minutes": 5, "grace_minutes": 15, "recovery_evaluations": 12}
+    return run
+
+
+def start(description=""):
     current = checkout()
     if not current["clean"]:
         raise ValueError("Commit your changes and use a clean checkout before starting a benchmark.")
@@ -64,8 +86,13 @@ def start():
         sha = current["sha"]
         identifier = uuid4().hex
         path = RESULTS / (identifier + ".json")
+        minute = timedelta(minutes=1)
         run = {
             "id": identifier, "sha": sha, "version": SUITE_VERSION, "seed": LAB_SEED, "models": model_settings(),
+            "description": description.strip(), "commit_subject": commit_subject(sha),
+            "methodology": {"effect_hours": 1, "follow_up_hours": CASE_HOURS - 1, "window_minutes": HOUR // minute,
+                            "evaluation_minutes": CADENCE // minute, "grace_minutes": GRACE // minute,
+                            "recovery_evaluations": HOUR // CADENCE},
             "started_at": datetime.now(timezone.utc).isoformat(), "status": "preparing", "case_count": len(CASES),
             "cases": [],
         }
@@ -92,7 +119,7 @@ def read_run(identifier):
     if re.fullmatch(r"[0-9a-f]{32}", identifier):
         path = RESULTS / (identifier + ".json")
         if path.is_file():
-            return json.loads(path.read_text())
+            return run_context(json.loads(path.read_text()))
     return None
 
 
@@ -105,14 +132,21 @@ def read_commit(sha):
     return None
 
 
+def median_minutes(cases, key):
+    measured = [case[key] for case in cases if not case["benign"] and case.get(key) is not None]
+    return median(measured) if measured else None
+
+
 def scoreboard():
     runs = []
     for path in RESULTS.glob("*.json"):
-        run = json.loads(path.read_text())
+        run = run_context(json.loads(path.read_text()))
         cases = run.pop("cases")
         run.update(completed=len(cases), detected=sum(c.get("detection_minutes") is not None for c in cases if not c["benign"]),
                    false_incidents=sum(c.get("false_incidents") or 0 for c in cases),
                    incidents=sum(c.get("incident_count") or 0 for c in cases),
-                   reviewed=sum(len(c.get("reviews", ())) for c in cases))
+                   reviewed=sum(len(c.get("reviews", ())) for c in cases),
+                   median_detection_minutes=median_minutes(cases, "detection_minutes"),
+                   median_recovery_minutes=median_minutes(cases, "recovery_minutes"))
         runs.append(run)
     return sorted(runs, key=lambda row: row["started_at"], reverse=True)

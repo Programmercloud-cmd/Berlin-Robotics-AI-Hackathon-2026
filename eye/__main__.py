@@ -48,6 +48,7 @@ def main():
     serve.add_argument("--port", type=int, default=8000)
     checks = commands.add_parser("check", help="run the payment regression in local PostgreSQL")
     checks.add_argument("--with-search", action="store_true", help="also verify the search regression")
+    commands.add_parser("check-holiday", help="replay the planned November event with healthy and degraded checkout")
     args = parser.parse_args()
     load_dotenv(Path(__file__).resolve().parents[1] / ".env")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
@@ -55,6 +56,12 @@ def main():
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("pgserver").setLevel(logging.WARNING)
     dsn = os.getenv("DATABASE_URL")
+
+    if args.command == "check-holiday":
+        from eye.holiday_replay import main as check_holiday
+
+        check_holiday()
+        return
 
     if args.command == "operator":
         from eye.operator import make_operator_app

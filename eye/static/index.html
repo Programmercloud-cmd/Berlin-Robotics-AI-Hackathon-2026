@@ -11,6 +11,7 @@
   <script defer src="/static/journey.js"></script>
   <script defer src="/static/activity.js"></script>
   <script defer src="/static/dashboard.js"></script>
+  <script defer src="/static/metric-insights.js"></script>
 </head>
 <body>
   <header class="app-bar">
@@ -101,6 +102,10 @@
             </table>
           </div>
         </section>
+        <details id="planned-events" class="panel planned-events" open hidden>
+          <summary>Planned events</summary>
+          <div id="planned-event-readings"></div>
+        </details>
         <section class="panel activity-panel" aria-labelledby="activity-title">
           <div class="panel-header"><h2 id="activity-title">Activity Graph</h2></div>
           <p id="activity-empty" class="placeholder">Investigations and their alerts appear here as Eye records them.</p>
@@ -120,5 +125,25 @@
       <button type="button" class="edge-toggle edge-right" id="show-signals" aria-label="Expand investigations" aria-controls="signals-panel" aria-expanded="false" hidden><span>Signals</span> <span class="edge-arrow" aria-hidden="true">‹</span></button>
     </div>
   </main>
+  <dialog id="metric-insights" class="metric-insights" aria-labelledby="metric-insights-title">
+    <div class="panel-header">
+      <div><h2 id="metric-insights-title">Metric Insights</h2><p class="panel-meta" id="metric-insights-description"></p></div>
+      <form method="dialog"><button type="submit" autofocus>Close</button></form>
+    </div>
+    <div class="metric-insights-body">
+      <div class="metric-insights-toolbar">
+        <label>Scope <select id="metric-insights-scope"></select></label>
+        <label>Check cadence <select id="metric-insights-cadence" disabled></select></label>
+        <button type="button" id="metric-insights-older">Older</button>
+        <button type="button" id="metric-insights-newer">Newer</button>
+        <button type="button" id="metric-insights-live">Live</button>
+      </div>
+      <p id="metric-insights-status" class="panel-meta" role="status"></p>
+      <p id="metric-insights-cadence-status" class="panel-meta" role="status" hidden></p>
+      <div id="metric-insights-chart"></div>
+      <p id="metric-insights-point" class="panel-meta"></p>
+      <div id="metric-insights-alert" aria-live="polite"></div>
+    </div>
+  </dialog>
 </body>
 </html>

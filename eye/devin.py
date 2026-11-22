@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 import httpx
 
+from eye.metric_policy import CADENCES
 from eye.scenario import ScenarioReply
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ ROLES = {
         })},
     })),
     "curation": ("graph curation", object_schema({
+        "cadence_minutes": {"type": "integer", "enum": list(CADENCES)},
         "relationships": {
             "type": "array", "maxItems": 8, "items": object_schema(RELATION_FIELDS),
         },

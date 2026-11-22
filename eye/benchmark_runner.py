@@ -17,7 +17,7 @@ from pgserver import get_server
 from psycopg import sql
 from pydantic import BaseModel, ConfigDict
 
-from eye import investigation, monitor, runtime, simulator
+from eye import benchmark_plots, investigation, monitor, runtime, simulator
 from eye.benchmark import write_run
 from eye.benchmark_cases import CASE_HOURS, CASES
 from eye.db import connect, setup
@@ -218,6 +218,15 @@ def main(path):
     finally:
         run["finished_at"] = datetime.now(timezone.utc).isoformat()
         write_run(path, run)
+        for kind in benchmark_plots.PLOTS:
+            if benchmark_plots.available(run, kind):
+                try:
+                    destination = path.with_suffix(f".{kind}.png")
+                    temporary = destination.with_suffix(".tmp")
+                    temporary.write_bytes(benchmark_plots.render(run, kind))
+                    temporary.replace(destination)
+                except Exception:
+                    log.exception("Could not render the benchmark %s plot", kind)
 
 
 if __name__ == "__main__":

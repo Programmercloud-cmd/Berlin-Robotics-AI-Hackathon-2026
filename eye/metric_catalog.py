@@ -1,5 +1,7 @@
 """Executable definitions from docs/metrics.md on plan/jacob."""
 
+from eye.metric_policy import default_cadence
+
 JOURNEY = ["country", "platform", "acquisition_channel"]
 SEARCH = ["country", "platform", "query_language"]
 FEED = ["country", "platform", "category", "recommendation_model_version"]
@@ -143,5 +145,9 @@ CATALOG = {item["id"]: item for item in [
 CATALOG["marketplace_contribution"]["access"]["dimension_mapping"] = {
     "target_country": "country", "advertising_channel": "acquisition_channel",
 }
+for definition in CATALOG.values():
+    definition["access"]["cadence_minutes"] = default_cadence(definition)
+    if definition["direction"] == "none":
+        definition["direction"] = "both"
 INITIAL_METRICS = [entry for identifier, entry in CATALOG.items() if identifier not in STAGED]
 TIMEOUT_RATE_METRIC = CATALOG["payment_timeout_rate"]

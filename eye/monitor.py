@@ -2,17 +2,21 @@
 
 from collections import defaultdict
 from math import ceil, sqrt
-from statistics import fmean, pstdev
+from statistics import fmean, pstdev, quantiles
 
 from psycopg.types.json import Jsonb
 from scipy.stats import binom
 
+from eye import seasonality
+from eye.db import state
 from eye.intervals import HOUR, aligned_history
 from eye.metric_catalog import CATALOG, INITIAL_METRICS, TIMEOUT_RATE_METRIC
+from eye.metric_policy import check_due
 from eye.metric_readings import Facts, MAX_MATURITY, metric_readings
 
 
 RATE_OPERATIONS = {"ratio", "share", "completeness"}
+SCORE_THRESHOLD = 4
 DETECTION_OP = """case when m.calculation->>'method' in ('lag', 'completeness') then m.calculation->>'method'
                        when m.calculation->>'op' = 'catalog' and m.access->>'unit' = 'ratio'
                        then 'ratio' else m.calculation->>'op' end"""
@@ -168,10 +172,7 @@ def interval_readings(definition, facts):
 
 def materialize_rolling(db, start, baseline, *, history_only=False):
     dates = aligned_history(start, baseline)
-    definitions = db.execute(
-        "select * from metrics where direction <> 'none' or %s",
-        (start.minute == 0,),
-    ).fetchall()
+    definitions = [metric for metric in db.execute("select * from metrics").fetchall() if check_due(metric, start)]
     cached = {(row["window_start"], row["metric_id"]) for row in db.execute(
         "select window_start, metric_id from observations where window_start = any(%s) and scope = '{}'", (dates,),
     ).fetchall()}
@@ -225,21 +226,41 @@ def baseline_level(samples, op):
     return fmean(row["value"] for row in samples), None, None
 
 
+def reference_range(samples):
+    if len(samples) < 4:
+        return None, None
+    band = quantiles([row["value"] for row in samples], n=10, method="inclusive")
+    return band[0], band[-1]
+
+
 def baseline_readings(db, starts, metric_id=None, scope=None):
     query = """select o.metric_id, o.window_start, o.scope, o.value, o.sample_size, o.details
-               from observations o join metrics m on m.id = o.metric_id and m.direction <> 'none'
+               from observations o join metrics m on m.id = o.metric_id
                left join observations q on q.window_start = o.window_start
                    and q.metric_id = 'data_completeness_ratio' and q.scope = '{}'
                where o.window_start = any(%s) and o.value is not null and coalesce(q.value, 1) >= 0.97"""
     if metric_id is not None:
         return db.execute(query + " and o.metric_id = %s and o.scope = %s",
                           (starts, metric_id, Jsonb(scope or {}))).fetchall()
-    return db.execute(query, (starts,)).fetchall()
+    return db.execute(query + " and m.direction <> 'none'", (starts,)).fetchall()
+
+
+def score_noise(operation, expected, size, baseline_size, samples):
+    variation = pstdev(row["value"] for row in samples)
+    if operation in RATE_OPERATIONS:
+        if size < 30 or baseline_size < 90:
+            return None
+        return max(variation, sqrt(max(0, expected * (1 - expected)) / size), 0.0125)
+    if operation == "lag":
+        return max(variation, 0.25, 0.045 * expected)
+    if expected >= 5:
+        return max(variation, sqrt(expected), 0.045 * expected)
+    return None
 
 
 def detect(db, window_start, history_starts, observed_at):
     recent = db.execute(
-        f"""select o.*, m.direction, m.access->'alert_dimensions' as alert_dimensions, {DETECTION_OP} as op
+        f"""select o.*, m.direction, m.calculation, m.access, m.access->'alert_dimensions' as alert_dimensions, {DETECTION_OP} as op
            from observations o join metrics m on m.id = o.metric_id
            where o.window_start = %s and o.value is not null order by o.metric_id, o.scope""",
         (window_start,),
@@ -249,38 +270,51 @@ def detect(db, window_start, history_starts, observed_at):
         key = row["metric_id"], tuple(sorted(row["scope"].items()))
         history[key].append(row)
 
-    complete = next((row["value"] for row in recent
-                     if row["metric_id"] == "data_completeness_ratio" and not row["scope"]), 1)
+    weekly, segments, event, lifts = [], set(), None, {}
+    if state(db, "seasonal_history"):
+        weekly, segments = seasonality.weekly_history(db, window_start)
+        event = seasonality.active_event(db, window_start)
+        if event:
+            lifts = seasonality.learn_event(db, event)
+
+    measured_completeness = next((row["value"] for row in recent
+                                  if row["metric_id"] == "data_completeness_ratio" and not row["scope"]), None)
+    complete = measured_completeness if measured_completeness is not None else 1
     anomalies = []
     for reading in recent:
         metric_id = reading["metric_id"]
         if reading["direction"] == "none" or (complete < 0.97 and metric_id != "data_completeness_ratio"):
             continue
+        if not check_due(reading, window_start):
+            continue
         if reading["alert_dimensions"] is not None and not set(reading["scope"]).issubset(reading["alert_dimensions"]):
             continue
         key = metric_id, tuple(sorted(reading["scope"].items()))
-        samples = history[key]
+        seasonal = seasonality.samples_for(weekly, segments, reading["scope"], metric_id) if weekly else []
+        samples = seasonal if len(seasonal) >= 3 else history[key]
         if len(samples) < 3:
             continue
         value, size = reading["value"], reading["sample_size"]
-        past = [row["value"] for row in samples]
         expected, successes, n = baseline_level(samples, reading["op"])
-        if reading["op"] in RATE_OPERATIONS:
-            if size < 30 or n < 90:
-                continue
-            noise = max(pstdev(past), sqrt(max(0, expected * (1 - expected)) / size), 0.0125)
-        elif reading["op"] == "lag":
-            noise = max(pstdev(past), 0.25, 0.045 * expected)
-        else:
-            if expected < 5:
-                continue
-            noise = max(pstdev(past), sqrt(expected), 0.045 * expected)
+        ordinary, planned = expected, None
+        if metric_id == "orders" and event and len(seasonal) >= 3 and lifts:
+            planned = seasonality.comparison(weekly, reading["scope"], expected, event, lifts, window_start, value)
+            if planned:
+                db.execute("""insert into planned_event_readings values (%s,%s,%s)
+                              on conflict (window_start,scope) do update set reading=excluded.reading""",
+                           (window_start, Jsonb(reading["scope"]), Jsonb(planned)))
+                if planned["status"] == "within expectation":
+                    continue
+                expected = planned["adjusted"]
+        noise = score_noise(reading["op"], expected, size, n, samples)
+        if noise is None:
+            continue
         score = (value - expected) / noise
         if reading["direction"] == "up" and score <= 0:
             continue
         if reading["direction"] == "down" and score >= 0:
             continue
-        if abs(score) < 4.0:
+        if abs(score) < SCORE_THRESHOLD:
             continue
         if reading["op"] in {"ratio", "share"} and 0 <= value <= 1 and 0 <= expected <= 1:
             outcomes, population = rate_counts(reading)
@@ -291,16 +325,28 @@ def detect(db, window_start, history_starts, observed_at):
             )
             if tail > 0.000032:
                 continue
+        lower, upper = reference_range(samples)
+        reference = {"method": "same-weekday rolling windows" if samples is seasonal else "time-aligned historical windows",
+                     "normal": ordinary, "references": len(samples), "p10": lower, "p90": upper,
+                     "observed": value, "expected": expected, "sample_size": size, "score": abs(score),
+                     "window_end": (window_start + HOUR).isoformat(), "observed_at": observed_at.isoformat(),
+                     "planned_event": planned, "completeness": measured_completeness, "quality": reading["details"].get("quality"),
+                     "numerator": reading["details"].get("numerator"), "denominator": reading["details"].get("denominator"),
+                     "baseline_numerator": successes, "baseline_denominator": n, "score_threshold": SCORE_THRESHOLD, "noise": noise}
         anomalies.append(db.execute(
             """insert into anomalies (metric_id, window_start, scope, observed, expected, score,
-                                      sample_size, window_end, observed_at)
-               values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                      sample_size, window_end, observed_at, detection_reference)
+               values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                on conflict (metric_id, window_start, scope) do update
                set observed = excluded.observed, expected = excluded.expected,
                    score = excluded.score, sample_size = excluded.sample_size,
-                   window_end = excluded.window_end, observed_at = excluded.observed_at
+                   window_end = excluded.window_end, observed_at = excluded.observed_at,
+                   detection_reference = case when anomalies.detection_reference = '{}'
+                                              then excluded.detection_reference else anomalies.detection_reference end
                returning *""",
             (metric_id, window_start, Jsonb(reading["scope"]), value, expected, abs(score), size,
-             window_start + HOUR, observed_at),
+             window_start + HOUR, observed_at, Jsonb(reference)),
         ).fetchone())
+    if segments:
+        seasonality.record_bucket(db, window_start + HOUR, segments)
     return sorted(anomalies, key=lambda row: -row["score"])

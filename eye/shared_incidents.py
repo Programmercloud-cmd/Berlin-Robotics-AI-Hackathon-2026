@@ -134,29 +134,53 @@ def revisit_groups(db, start, cutoff, readings, facts):
         paths = build_paths(db, journeys)
         for child in children:
             decision = assess(paths, kind, child, readings)
-            status = decision["status"]
-            previous = child["relationship_status"]
-            if status == "linked" and not supported:
-                status = "provisional"
-                decision.update(status=status, reason="The measured upstream change still has provisional cohort support.")
-            if status == "linked" and previous is None:
-                status = "provisional"
-                decision.update(status=status, reason="The first matching window supports an upstream link. Eye will check the next window before grouping.")
-            if previous == "linked" and status != "independent":
-                continue
-            if previous is None and status == "independent":
-                continue
-            decision.update(parent_id=parent["id"], incident_id=child["id"], window_start=start.isoformat(),
-                            observed_at=cutoff.isoformat(), upstream=kind)
-            saved = db.execute(
-                """insert into incident_relationships values (%s,%s,%s,%s,%s) on conflict (incident_id)
-                   do update set status=excluded.status, observed_at=excluded.observed_at, decision=excluded.decision
-                   where incident_relationships.parent_id=excluded.parent_id""",
-                (child["id"], parent["id"], status, cutoff, Jsonb(decision)),
-            )
-            if saved.rowcount and status != previous:
-                db.execute("insert into evidence(incident_id, window_start, kind, payload) values (%s,%s,'incident grouping',%s)",
-                           (child["id"], start, Jsonb(decision)))
-                if status in {"linked", "independent"}:
-                    db.execute("""update incidents set report=report || '{"deep_investigation":"pending"}'
-                                  where id=%s""", (parent["id"],))
+            if decision["status"] == "linked" and not supported:
+                decision.update(status="provisional", reason="The measured upstream change still has provisional cohort support.")
+            record_relationship(db, parent, child, kind, start, cutoff, decision)
+
+    attempts = {tuple(sorted(row["scope"].items())): row for row in incidents
+                if row["metric_id"] == "payment_attempts" and not row["recovered_at"]}
+    for child in incidents:
+        if (child["metric_id"] != "successful_payments" or child["recovered_at"]
+                or child["relationship_status"] == "independent"):
+            continue
+        parent = attempts.get(tuple(sorted(child["scope"].items())))
+        if not parent or (child["relationship_status"] == "linked" and child["parent_id"] != parent["id"]):
+            continue
+        decision = assess((), "attempt_volume", child, readings, facts=facts)
+        record_relationship(db, parent, child, "attempt_volume", start, cutoff, decision)
+
+
+def record_relationship(db, parent, child, kind, start, cutoff, decision):
+    direct = kind == "attempt_volume"
+    old_parent = child["parent_id"]
+    replacing = old_parent not in (None, parent["id"])
+    previous = None if replacing else child["relationship_status"]
+    status = decision["status"]
+    if status == "linked" and previous is None:
+        status = "provisional"
+        decision.update(status=status, reason="The first matching window supports an upstream link. Eye will check the next window before grouping.")
+    awaiting_receipts = (direct and decision.get("conditional_status") == "degraded"
+                         and decision.get("linked_cohort", {}).get("pending_outcomes"))
+    if previous == "linked" and status != "independent" and not awaiting_receipts:
+        return
+    if not direct and previous is None and status == "independent":
+        return
+    decision.update(parent_id=parent["id"], incident_id=child["id"], window_start=start.isoformat(),
+                    observed_at=cutoff.isoformat(), upstream=kind)
+    saved = db.execute(
+        """insert into incident_relationships values (%s,%s,%s,%s,%s) on conflict (incident_id)
+           do update set parent_id=excluded.parent_id, status=excluded.status,
+                         observed_at=excluded.observed_at, decision=excluded.decision
+           where incident_relationships.parent_id=excluded.parent_id
+                 or (%s and incident_relationships.status='provisional')""",
+        (child["id"], parent["id"], status, cutoff, Jsonb(decision), direct),
+    )
+    if not saved.rowcount:
+        return
+    child.update(parent_id=parent["id"], relationship_status=status)
+    if status != previous:
+        db.execute("insert into evidence(incident_id, window_start, kind, payload) values (%s,%s,'incident grouping',%s)",
+                   (child["id"], start, Jsonb(decision)))
+        db.execute("""update incidents set report=report || '{"deep_investigation":"pending"}'
+                      where id=any(%s)""", ([identifier for identifier in {parent["id"], old_parent} if identifier is not None],))

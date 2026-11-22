@@ -16,12 +16,12 @@ from threading import Event, Lock, Thread
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from eye import benchmark
+from eye import benchmark, benchmark_plots
 from eye.db import connect, setup, state
 from eye.lab_results import evaluate, workflow_readings
 from eye.model import configured_devin
@@ -63,6 +63,7 @@ class Lab:
         self.messages = []
         self.runs = []
         self.active = None
+        self.injection = None
 
     def boot(self):
         try:
@@ -147,35 +148,69 @@ class Lab:
 
     def receive(self, message):
         with self.lock:
-            if not self.active or message["id"] != self.active["id"]:
+            run = next((run for run in (self.injection, self.active) if run and run["id"] == message["id"]), None)
+            if not run:
                 return
             event = message.pop("event")
-            self.active.update(message)
-            self.active["status"] = {
+            run.update(message)
+            run["status"] = {
                 "started": "publishing", "window": "publishing", "finished": "published", "error": "failed",
             }[event]
             if event in {"error", "finished"}:
-                self.active = None
+                if run is self.injection:
+                    self.injection = None
+                else:
+                    self.active = None
+                    if self.injection:
+                        self.injection.update(status="failed", error="StreamUnavailable")
+                        self.injection = None
 
-    def queue(self, *, hours=None, scenario=None, plan_id=None):
+    def send_command(self, command):
+        try:
+            self.simulator.stdin.write(json.dumps(command) + "\n")
+            self.simulator.stdin.flush()
+        except OSError:
+            raise HTTPException(409, "The simulator is no longer accepting commands.") from None
+
+    def can_inject(self):
+        return bool(self.active and self.active.get("continuous") and not self.active.get("stop_requested")
+                    and self.injection is None)
+
+    def queue(self, *, hours=None, scenario=None, plan_id=None, continuous=False):
         with self.lock:
             if self.phase != "ready" or self.simulator.poll() is not None or self.eye.poll() is not None:
                 raise HTTPException(409, "Wait for the simulator and Eye to be ready.")
-            if self.active:
+            injected = bool(scenario and self.can_inject())
+            if self.active and not injected:
                 raise HTTPException(409, "Wait for the simulator to publish its current windows.")
             run = {
                 "id": uuid4().hex, "status": "queued", "published": 0, "plan_id": plan_id,
                 "hours": hours, "scenario": scenario,
             }
-            try:
-                command = {key: run[key] for key in ("id", "hours")}
-                command["scenario"] = {key: value for key, value in scenario.items() if key != "premise"} if scenario else None
-                self.simulator.stdin.write(json.dumps(command) + "\n")
-                self.simulator.stdin.flush()
-            except OSError:
-                raise HTTPException(409, "The simulator is no longer accepting commands.") from None
-            self.active = run
+            if continuous:
+                run.update(continuous=True, stop_requested=False)
+            command = {key: run[key] for key in ("id", "hours")}
+            command["continuous"] = continuous
+            command["scenario"] = {key: value for key, value in scenario.items() if key != "premise"} if scenario else None
+            if injected:
+                command["inject_into"] = self.active["id"]
+                run["injected"] = True
+            self.send_command(command)
+            if injected:
+                self.injection = run
+            else:
+                self.active = run
             self.runs.append(run)
+            return run["id"]
+
+    def stop_continuous(self):
+        with self.lock:
+            run = self.active
+            if not run or not run.get("continuous"):
+                raise HTTPException(409, "Continuous traffic is idle.")
+            if not run["stop_requested"]:
+                self.send_command({"id": run["id"], "stop": True})
+                run["stop_requested"] = True
             return run["id"]
 
     def ask(self, prompt):
@@ -227,12 +262,13 @@ class Lab:
         with self.lock:
             phase, error, dsn = self.phase, self.error, self.dsn
             active = self.active["id"] if self.active else None
+            can_inject = self.can_inject()
             messages = [item.copy() for item in self.messages]
             runs = [run.copy() for run in self.runs[-20:]]
             simulator_pid = self.simulator.pid if self.simulator and self.simulator.poll() is None else None
             eye_pid = self.eye.pid if self.eye and self.eye.poll() is None else None
         result = {
-            "phase": phase, "error": error, "busy": bool(active), "devin_enabled": bool(self.devin),
+            "phase": phase, "error": error, "busy": bool(active), "can_inject": can_inject, "devin_enabled": bool(self.devin),
             "messages": messages, "runs": runs[::-1], "seed": LAB_SEED,
             "simulator_pid": simulator_pid, "eye_pid": eye_pid,
         }
@@ -269,6 +305,10 @@ class NormalRequest(BaseModel):
     hours: int = Field(ge=1, le=48)
 
 
+class BenchmarkRequest(BaseModel):
+    description: str = Field(default="", max_length=240)
+
+
 def make_lab_app(eye_port=8000):
     lab = Lab(configured_devin(), eye_port)
 
@@ -299,9 +339,9 @@ def make_lab_app(eye_port=8000):
         return {"checkout": benchmark.checkout(), "runs": benchmark.scoreboard()}
 
     @app.post("/api/benchmarks", status_code=202, dependencies=[Depends(local_action)])
-    def start_benchmark():
+    def start_benchmark(request: BenchmarkRequest | None = None):
         try:
-            return {"id": benchmark.start()}
+            return {"id": benchmark.start(request.description if request else "")}
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
 
@@ -316,6 +356,19 @@ def make_lab_app(eye_port=8000):
         if run := benchmark.read_run(identifier):
             return run
         raise HTTPException(404, "Benchmark run not found.")
+
+    @app.get("/api/benchmarks/{identifier}/plots/{kind}.png")
+    def get_benchmark_plot(identifier: str, kind: str):
+        run = benchmark.read_run(identifier)
+        if not run or not run.get("finished_at") or not benchmark_plots.available(run, kind):
+            raise HTTPException(404, "Benchmark plot unavailable.")
+        path = benchmark.RESULTS / f"{identifier}.{kind}.png"
+        if path.is_file():
+            return FileResponse(path, media_type="image/png")
+        try:
+            return Response(benchmark_plots.render(run, kind), media_type="image/png")
+        except ImportError:
+            raise HTTPException(503, "Install requirements-local.txt to generate benchmark plots.") from None
 
     @app.get("/theme.css", include_in_schema=False)
     def theme():
@@ -342,6 +395,14 @@ def make_lab_app(eye_port=8000):
     @app.post("/api/normal", status_code=202, dependencies=[Depends(local_action)])
     def normal(request: NormalRequest):
         return {"id": lab.queue(hours=request.hours)}
+
+    @app.post("/api/normal/continuous", status_code=202, dependencies=[Depends(local_action)])
+    def continuous_traffic():
+        return {"id": lab.queue(continuous=True)}
+
+    @app.post("/api/normal/stop", status_code=202, dependencies=[Depends(local_action)])
+    def stop_traffic():
+        return {"id": lab.stop_continuous()}
 
     @app.post("/api/plans/{identifier}/apply", status_code=202, dependencies=[Depends(local_action)])
     def apply(identifier: str):

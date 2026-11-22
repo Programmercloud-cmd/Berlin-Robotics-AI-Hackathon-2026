@@ -28,9 +28,22 @@ def configured_devin():
     return None
 
 
-def configured_model():
+def configured_provider():
     mode = os.getenv("EYE_MODEL")
-    if mode == "devin":
+    if mode in {"devin", "codex", "local"}:
+        return mode
+    if os.getenv("MODEL_NAME"):
+        return "chat-completions"
+    if not mode and os.getenv("DEVIN_API_KEY") and os.getenv("DEVIN_ORG_ID"):
+        return "devin"
+    return "local"
+
+
+def configured_model():
+    provider = configured_provider()
+    if provider == "local":
+        return None
+    if provider == "devin":
         devin = configured_devin()
         if not devin:
             log.warning("Devin requires DEVIN_API_KEY and DEVIN_ORG_ID. Using local reasoning fallback.")
@@ -38,9 +51,6 @@ def configured_model():
     name = os.getenv("MODEL_NAME")
     key = os.getenv("MODEL_API_KEY") or os.getenv("OPENAI_API_KEY")
     base = os.getenv("MODEL_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    if mode != "codex" and not name:
-        return None
-
     retry_at = 0.0
 
     def reason(system, prompt):
@@ -49,7 +59,7 @@ def configured_model():
             return {}
         content = json.dumps(prompt, default=str)
         try:
-            if mode == "codex":
+            if provider == "codex":
                 with tempfile.TemporaryDirectory(prefix="eye-reasoning-") as directory:
                     output = Path(directory) / "answer.json"
                     subprocess.run(

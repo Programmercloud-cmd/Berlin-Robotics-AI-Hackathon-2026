@@ -5,10 +5,12 @@ from math import sqrt
 
 from scipy.stats import binom
 
+from eye.metric_catalog import OUTCOMES
 from eye.transitions import BY_ID
 
 PROJECTIONS = {"checkout_sessions": "checkout", "payment_attempts": "payment",
                "successful_payments": "payment", "orders": "order"}
+ATTEMPT_VOLUME = {"payment_attempts", "successful_payments"}
 
 
 def linked_steps(events, carts):
@@ -89,7 +91,23 @@ def projected_loss(paths, step, scope, measure):
             "standard_error": sqrt(variance), "linked_event_ids": examples}
 
 
-def assess(paths, kind, target, readings):
+def payment_receipts(facts, scope):
+    attempts = {row["attrs"]["payment_id"]: row for row in facts.by_activity["payment_attempted"]
+                if row["attrs"].get("payment_id") and matching(row, scope)}
+    outcomes = {}
+    for activity in OUTCOMES:
+        for row in facts.following[activity]:
+            key = row["attrs"].get("payment_id")
+            if key in attempts and row["occurred_at"] >= attempts[key]["occurred_at"]:
+                outcomes.setdefault(key, row)
+    pending = attempts.keys() - outcomes.keys()
+    samples = list(outcomes)[:2] + sorted(pending)[:1]
+    return {"pending_outcomes": len(pending), "linked_event_ids": [
+        {"attempt": attempts[key]["id"], "outcome": outcomes[key]["id"] if key in outcomes else None}
+        for key in samples]}
+
+
+def assess(paths, kind, target, readings, *, facts=None):
     """Check whether missing attempts can account for the scoped incident's lost completions."""
     step = PROJECTIONS[target["metric_id"]]
     scope = target["scope"]
@@ -99,7 +117,8 @@ def assess(paths, kind, target, readings):
     # Checkout is where inventory blocks completion. Use the eligible carts as its denominator,
     # and compare the unaffected carts separately to test for another checkout problem.
     gate = kind == "stock" and step == "checkout"
-    projection = projected_loss(paths, step, scope, int(gate))
+    direct = kind == "attempt_volume"
+    projection = payment_receipts(facts, scope) if direct else projected_loss(paths, step, scope, int(gate))
     baseline_rate = rate["expected"]
     baseline_attempts = rate["baseline_eligible"] / len(readings.historic)
     missing_attempts = max(0, baseline_attempts - rate["eligible"])
@@ -121,19 +140,29 @@ def assess(paths, kind, target, readings):
         independent = rate["status"] == "degraded"
         enough = rate["status"] == "steady"
         shortfall = missing_attempts if target["metric_id"] == "payment_attempts" else missing_attempts * baseline_rate + conditional_loss
-        explained = projection["lost"] if target["metric_id"] == "payment_attempts" else projection["lost"] * baseline_rate
-        standard_error = projection["standard_error"]
+        if direct:
+            explained = missing_attempts * baseline_rate
+            n = rate["eligible"]
+            standard_error = sqrt(baseline_rate * (1 - baseline_rate) * (n + n * n / rate["baseline_eligible"]))
+        else:
+            explained = projection["lost"] if target["metric_id"] == "payment_attempts" else projection["lost"] * baseline_rate
+            standard_error = projection["standard_error"]
     remainder = max(0, shortfall - explained)
+    tolerance = max(4, 1.64 * standard_error)
+    samples_ready = direct or min(projection["matched_exposed"], projection["matched_control"]) >= 12
     status, reason = "provisional", "The linked cohorts leave a material volume gap or too little conditional evidence."
-    if independent:
+    if direct and projection["pending_outcomes"]:
+        reason = "Some scoped attempts still lack an outcome receipt. The completion comparison is provisional."
+    elif independent:
         status, reason = "independent", "Completion fell among comparable attempts even after accounting for upstream loss."
-    elif (enough and projection["matched_exposed"] >= 12 and projection["matched_control"] >= 12
-          and shortfall >= 4 and explained >= .55 * shortfall
-          and remainder <= max(4, 1.64 * standard_error)):
-        status, reason = "linked", "The linked upstream loss accounts for the scoped volume shortfall within sampling uncertainty."
+    elif enough and samples_ready and shortfall >= 4 and explained >= .55 * shortfall and remainder <= tolerance:
+        status = "linked"
+        reason = ("Fewer attempts account for the success-volume shortfall within expected variation." if direct else
+                  "The linked upstream loss accounts for the scoped volume shortfall within sampling uncertainty.")
     return {"status": status, "reason": reason, "scope": scope, "metric_id": target["metric_id"],
             "baseline_attempts": baseline_attempts, "eligible_attempts": rate["eligible"],
             "completed": rate["completed"], "baseline_completion_rate": baseline_rate, "checked_completion_rate": control_rate,
             "conditional_status": rate["status"], "fewer_attempts_at_baseline_rate": missing_attempts * baseline_rate,
             "conditional_completion_loss": conditional_loss, "scope_volume_loss": shortfall,
-            "upstream_explained": explained, "unexplained": remainder, "linked_cohort": projection}
+            "upstream_explained": explained, "unexplained": remainder, "expected_variation": tolerance,
+            "linked_cohort": projection}

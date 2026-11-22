@@ -102,6 +102,7 @@ create table if not exists anomalies (
 alter table anomalies add column if not exists detected_at timestamptz default clock_timestamp();
 alter table anomalies add column if not exists window_end timestamptz;
 alter table anomalies add column if not exists observed_at timestamptz;
+alter table anomalies add column if not exists detection_reference jsonb not null default '{}';
 alter table anomalies drop constraint if exists anomalies_window_start_fkey;
 
 create table if not exists incidents (
@@ -128,21 +129,31 @@ create table if not exists incident_relationships (
 create index if not exists incident_relationships_parent on incident_relationships(parent_id);
 
 create or replace view incident_groups as
+with recursive membership(incident_id, ancestor_id) as (
+    select id, id from incidents
+    union all
+    select m.incident_id, r.parent_id from membership m
+    join incident_relationships r on r.incident_id = m.ancestor_id and r.status = 'linked'
+), roots as (
+    select m.* from membership m where not exists (
+        select 1 from incident_relationships r where r.incident_id = m.ancestor_id and r.status = 'linked'
+    )
+)
 select i.id,
-       coalesce(r.parent_id, i.id) as group_id,
+       roots.ancestor_id as group_id,
        coalesce(m.members, array[]::bigint[]) as linked_incident_ids,
        case when i.recovered_at is not null and coalesce(m.all_recovered, true)
             then greatest(i.recovered_at, m.last_recovered) end as recovered_at,
        case when i.recovered_at is not null and coalesce(m.all_recovered, true)
             then greatest((i.report->>'recovery_observed_at')::timestamptz, m.last_recovery_observed) end as recovery_observed_at
 from incidents i
-left join incident_relationships r on r.incident_id = i.id and r.status = 'linked'
+join roots on roots.incident_id = i.id
 left join lateral (
     select array_agg(c.id order by c.id) as members, bool_and(c.recovered_at is not null) as all_recovered,
            max(c.recovered_at) as last_recovered,
            max((c.report->>'recovery_observed_at')::timestamptz) as last_recovery_observed
-    from incident_relationships k join incidents c on c.id = k.incident_id
-    where k.parent_id = i.id and k.status = 'linked'
+    from membership k join incidents c on c.id = k.incident_id
+    where k.ancestor_id = i.id and c.id <> i.id
 ) m on true;
 
 create table if not exists pending_reports (
@@ -170,8 +181,38 @@ create table if not exists evidence (
     payload jsonb not null
 );
 alter table evidence drop constraint if exists evidence_window_start_fkey;
+create index if not exists evidence_alert_lookup on evidence(window_start, (payload->>'id'))
+    where kind in ('anomaly', 'related anomaly', 'ongoing anomaly');
 
 create table if not exists runtime (
     key text primary key,
     value jsonb not null
+);
+
+create table if not exists seasonal_buckets (
+    minutes smallint not null,
+    start_at timestamptz not null,
+    country text not null,
+    platform text not null,
+    counts jsonb not null,
+    rates jsonb not null,
+    complete boolean not null,
+    primary key (minutes, start_at, country, platform)
+);
+
+create table if not exists planned_events (
+    series text not null,
+    name text not null,
+    starts_at timestamptz not null,
+    ends_at timestamptz not null,
+    scope jsonb not null,
+    primary key (series, starts_at),
+    check (ends_at > starts_at)
+);
+
+create table if not exists planned_event_readings (
+    window_start timestamptz not null,
+    scope jsonb not null,
+    reading jsonb not null,
+    primary key (window_start, scope)
 );

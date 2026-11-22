@@ -15,7 +15,7 @@ python -m eye operator
 
 Open the [operator panel on port 8001](http://127.0.0.1:8001) and click **Start test lab**. The panel opens before PostgreSQL starts and shows baseline and discovery progress. Open the [test lab on port 8002](http://127.0.0.1:8002) to create a scenario. The [Eye dashboard on port 8000](http://127.0.0.1:8000) becomes available after discovery.
 
-Run `python -m eye lab` to open the lab directly when ports 8000 and 8002 are free. Each lab session uses a temporary local PostgreSQL database and a separate simulator process. Ctrl+C stops the session.
+Run `python -m eye lab` to open the lab directly when ports 8000 and 8002 are free. Each lab session uses a temporary local PostgreSQL database and a separate simulator process. The first startup saves the seed-42 history under `.runtime/seasonality/`. Later startups restore that baseline into a fresh database. Ctrl+C stops the session.
 
 On systems where Python's `ensurepip` is unavailable, create the environment with `python3 -m venv --without-pip .venv` and install with `python3 -m pip --python .venv/bin/python install -r requirements-local.txt`.
 
@@ -30,10 +30,10 @@ The original `product_views` and `cart_additions` map to distinct session-cohort
 ## Run a scenario
 
 1. Set `DEVIN_API_KEY` and `DEVIN_ORG_ID` in the repo-root `.env` for chat. Try “Frankfurt product pages fail to load” or “people struggle to add products to their cart.” Devin can map both premises to the same **Fewer successful completions** effect at different workflow transitions. Other premises can model gateway timeouts, delayed payment success receipts, or a faster search rollout with a holdout.
-2. Review the transition, affected traffic, severity, and duration. Unspecified scope is marketplace-wide. For completion loss, severity is the fraction of otherwise successful attempts that the simulator prevents from completing. Click **Apply to upcoming windows** when the preview is ready.
+2. Review the transition, affected traffic, severity, and duration. Unspecified scope is marketplace-wide. For completion loss, severity is the fraction of otherwise successful attempts that the simulator prevents from completing. Click **Apply to upcoming windows** or **Inject into live traffic** when the preview is ready.
 3. Read **Run timeline** for the applied plan, scenario start and end, Eye’s first alert and scope, and recorded recovery. Follow the incident link for the evidence and diagnosis. Alert details show both window bounds and the virtual evaluation time after the ingestion grace period. Real latency measures from the start of publishing the scenario to the persisted alert. Each scenario publishes four healthy hours afterward.
 
-Use **Generate traffic** to publish normal hours while Devin is preparing a plan. Normal traffic follows a repeating 28-day volume pattern with seeded variation. Every generated window advances the virtual clock and uses fresh event IDs. Select **Review replay** to preview a previous plan, or use **Download JSON** and **Review saved scenario** to preview it in a later lab session. Applying the preview uses the next virtual windows.
+Use **Generate traffic** for a fixed number of normal hours, or click **Start continuous traffic** to keep publishing until you stop it. While traffic is streaming, approve a scenario with **Inject into live traffic**. It starts at the next unpublished virtual hour and normal traffic resumes at the scenario end. **Stop continuous traffic** finishes the current virtual hour or any already accepted injection, then allows late events to arrive. Normal traffic follows a repeating 28-day volume pattern with seeded variation, and each window advances the virtual clock and uses fresh event IDs. Select **Review replay** to preview a previous plan, or use **Download JSON** and **Review saved scenario** to preview it in a later lab session.
 
 For the rolling detection replay, use a fresh seed-42 lab and import the following plan, then apply the preview.
 
@@ -43,7 +43,7 @@ For the rolling detection replay, use a fresh seed-42 lab and import the followi
 
 The simulator map outlines a draft’s affected branch with dashes and uses a solid outline during the active scenario windows. Use **Show on map** in the run timeline to inspect an earlier run. The map counts outcomes within the selected scenario’s scope and affected windows, and the receipt lane updates as later windows publish.
 
-The workflow diagram, scenario premises, and controls stay in the test lab. Eye reads observed requests, outcomes, and closed windows from PostgreSQL and compares successive funnel steps with their baselines. Set `EYE_MODEL=devin` when launching the operator or lab if Eye should also use Devin for incident reports. The lab chat uses Devin with valid credentials regardless of Eye’s chosen report provider.
+The workflow diagram, scenario premises, and controls stay in the test lab. Eye reads observed requests, outcomes, and closed windows from PostgreSQL and compares successive funnel steps with their baselines. Both the lab chat and Eye use Devin by default when `DEVIN_API_KEY` and `DEVIN_ORG_ID` are set.
 
 On Eye’s dashboard, **Graph** shows the observed workflow and **Table** opens the metric catalog. The eye menu includes **Journey**, which arranges the shopping path from left to right with search, recommendations, and receipt delivery in separate lanes. Selecting an incident highlights its observed evidence connections in plum and shows the scope above the graph. Use **Clear selection** to restore the full contrast. All three local views use the Bright and Dark palettes from `AI_Chronicle_UI`, and the header toggle follows you between views on the same host.
 
@@ -53,6 +53,12 @@ Each incident card shows the first measured workflow break, scope, completion ra
 
 Run `python -m eye check --with-search` for the payment and search regressions in local PostgreSQL. Run `python -m unittest discover -s tests -p test_incident_grouping.py` to reproduce the cart-only and concurrent cart/payment cases.
 
+### Planned November shopping replay
+
+Run `python -m eye check-holiday` to replay the first hour of the November 22, 2026 shopping period with healthy checkout and with a checkout regression. The command uses the shared seed-42 history and writes the comparisons and incident evidence to `.runtime/seasonality/holiday-replay.json`.
+
+Eye’s **Planned events** panel shows the date and scope, observed orders, the ordinary expectation, and the event-adjusted expectation and range. The archive keeps eight weeks of five-minute funnel counts and rate components, plus 365 days of daily aggregates. Eye uses complete same-weekday rolling windows for normal traffic and compares the prior event with same-weekday non-event days in each country/platform segment. A local trend fit estimates what the prior occasion would have looked like on an ordinary day. The display identifies the single prior occurrence and the uncertainty allowance. Traffic settings and checkout controls are private to the lab.
+
 ## Benchmark
 
 Commit the code and start the lab from a clean checkout with `DEVIN_API_KEY` and `DEVIN_ORG_ID` set. Open [Benchmark](http://127.0.0.1:8002/benchmark) and click **Run benchmark**. The same SHA can run again. Eye uses the model settings from the lab launch. To benchmark statistical reports with Devin as the reviewer, set `EYE_MODEL=local` and leave `MODEL_NAME` unset. The reviewer uses its own Devin session.
@@ -61,9 +67,13 @@ Suite v1 runs ten seed-42 cases. Each case starts from an isolated copy of the s
 
 The runner executes an archive of the recorded SHA. Scoreboard records and local logs are kept in `.runtime/benchmarks/` across lab restarts. Open the SHA link to read the local Git commit, or the run link to read case results. The Benchmark view and review rubrics are served by the Test Lab.
 
+Click a scoreboard column heading to sort. Click again to reverse the order. Timing medians use measured values from fault cases, and runs without a measurement sort last.
+
+Add a **Run description** before starting to record the change or question you are testing. The scoreboard uses the commit subject when the description is blank. Open **Case results** and expand **Run description and methodology** for the saved replay, timing, recovery, and review rules. The Seaborn plots compare detection, recovery, and incident counts by case and show Devin verdict counts by report phase. New runs save standalone PNGs beside the run record. Existing runs can render the same plots from their saved data.
+
 ## Live reasoning
 
-Run `EYE_MODEL=codex python -m eye lab` to use an authenticated Codex CLI on your PATH. To use an OpenAI-compatible JSON chat completions provider, copy [the environment example](.env.example) to `.env` and set `MODEL_NAME`, `MODEL_API_KEY` and, if applicable, `MODEL_BASE_URL`. With no reachable provider, graph curation uses the registered calculations and the investigator produces a statistical report. The report records which reasoning path ran.
+Run `EYE_MODEL=codex python -m eye lab` to use an authenticated Codex CLI on your PATH. To use an OpenAI-compatible JSON chat completions provider, leave `EYE_MODEL` empty and set `MODEL_NAME`, `MODEL_API_KEY` and, if applicable, `MODEL_BASE_URL`. Set `EYE_MODEL=local` to use Eye’s statistical reports and calculation-based curation directly. Eye also uses those fallbacks when its reasoning provider is unavailable. The report records which reasoning path ran. [Environment example](.env.example)
 
 ### Devin API v3
 
@@ -72,7 +82,7 @@ Set `DEVIN_API_KEY` and `DEVIN_ORG_ID` in the repo-root `.env`. Use one organiza
 Start the test lab launcher.
 
 ```sh
-EYE_MODEL=devin DEVIN_MODE=lite python -m eye operator
+DEVIN_MODE=lite python -m eye operator
 ```
 
 Start the test lab from the [operator panel](http://127.0.0.1:8001), then follow its dashboard link. Each Devin session can take a few minutes to start and respond.

@@ -13,6 +13,8 @@ from eye.intervals import CADENCE, HOUR, aligned_history
 from eye.investigation_branches import build_branches
 from eye.model import ask
 from eye.observation import observation_tool
+from eye.downstream_impact import ATTEMPT_VOLUME
+from eye.seasonality import readings_at
 from eye.shared_incidents import COMPLETENESS, cohort_plan, revisit_groups, source_plans
 from eye.transitions import ALERT_STEPS, BY_ID, POSITIONS, WORKFLOW, Readings, compatible
 
@@ -213,6 +215,9 @@ def collect_evidence(db, tool, anomaly, incident, baseline, completion=None):
         "segment_comparison": comparisons, "context": window_context, "graph_path": paths,
         "first_observable_break": first_break, "transition": completion,
     }
+    if planned := readings_at(db, start, scope):
+        context["planned_event"] = report["planned_event"] = planned
+        add_evidence(db, incident, start, "planned event comparison", planned)
     return report, context
 
 
@@ -430,7 +435,7 @@ def open_incident(db, tool, start, baseline, anchor, alerts, model, completion=N
         db.execute("insert into pending_reports values (%s, %s, %s)",
                    (incident_id, jsonb(context), jsonb(report)))
         report = {key: report[key] for key in
-                  ("summary", "affected_scope", "path", "first_observable_break", "shared_explanation") if key in report}
+                  ("summary", "affected_scope", "path", "first_observable_break", "shared_explanation", "planned_event") if key in report}
     if completion:
         report["break"] = completion
     else:
@@ -555,7 +560,8 @@ def track(db, start, anomalies, model=None, *, history=None, facts=None, observe
             accounted.add(identifier)
     readings, groups = None, []
     if any(row["metric_id"] in ALERT_STEPS for row in anomalies) or any(
-            incident["report"].get("break", {}).get("id") in BY_ID for incident in open_incidents):
+            incident["metric_id"] in ATTEMPT_VOLUME or incident["report"].get("break", {}).get("id") in BY_ID
+            for incident in open_incidents):
         if history is not None:
             discarded = {row["window_start"] for row in db.execute(
                 """select window_start from observations where metric_id = 'data_completeness_ratio'

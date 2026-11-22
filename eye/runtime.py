@@ -9,6 +9,7 @@ from eye import curation, graph, investigation, monitor
 from eye.db import connect, set_state, setup, state
 from eye.intervals import CADENCE, GRACE, HOUR
 from eye.metric_catalog import CATALOG, INITIAL_METRICS, LEGACY, STAGED
+from eye.metric_policy import CADENCES
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +28,14 @@ def initialize(dsn):
                      and access->'alert_dimensions' is distinct from %s""",
                 (Jsonb(completeness), Jsonb(completeness)),
             )
+            if not state(db, "metric_policy_version"):
+                with db.cursor() as cursor:
+                    cursor.executemany("""update metrics set access=jsonb_set(access,'{cadence_minutes}',%s),
+                                          direction=case when direction='none' then %s else direction end
+                                          where id=%s and not access ? 'cadence_minutes'""",
+                                       [(Jsonb(entry["access"]["cadence_minutes"]), entry["direction"], entry["id"])
+                                        for entry in CATALOG.values()])
+                set_state(db, "metric_policy_version", 1)
             return True
         baseline = (datetime.fromisoformat(previous) if previous else
                     db.execute("select max(start_at) as value from windows").fetchone()["value"])
@@ -45,13 +54,18 @@ def initialize(dsn):
             for key in ("baseline_through", "last_window", "last_discovery"):
                 set_state(db, key, baseline.isoformat())
         set_state(db, "metric_catalog_version", 1)
+        set_state(db, "metric_policy_version", 1)
         log.info("Established historical baseline through %s", baseline)
     return True
 
 
 def register(dsn, metric, model=None):
+    cadence = metric.get("cadence_minutes")
+    if cadence is not None and cadence not in CADENCES:
+        raise ValueError("Choose a supported check cadence in minutes.")
     if definition := CATALOG.get(metric["id"]):
         metric = {**definition, "direction": metric.get("direction", definition["direction"])}
+    metric = {**metric, "cadence_minutes": cadence, "infer_cadence": cadence is None}
     monitor.validate_calculation(metric["calculation"])
     with connect(dsn) as db:
         result = curation.curate(db, metric, model)

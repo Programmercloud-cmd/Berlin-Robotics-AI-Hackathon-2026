@@ -68,7 +68,20 @@ dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; }
 #error { position: fixed; right: 1rem; bottom: 1rem; max-width: min(32rem, calc(100vw - 2rem)); padding: .75rem 1rem; border: 1px solid var(--danger); border-radius: .4rem; background: var(--surface); color: var(--danger); }
 .benchmark-results { margin-top: 1rem; }
-.benchmark-results article { padding: .85rem 0; border-top: 1px solid var(--line); }
+#benchmark-description { flex: 1 1 16rem; min-width: 0; padding: .5rem .65rem; border: 1px solid var(--line); border-radius: .35rem; background: var(--field); }
+.benchmark-run-note { max-width: 22rem; margin-top: .2rem; color: var(--muted); font-weight: 400; overflow-wrap: anywhere; }
+#benchmark-scoreboard th button { padding: .15rem 0; border: 0; background: transparent; color: inherit; font: inherit; font-weight: 650; text-align: left; }
+#benchmark-scoreboard th button:hover { color: var(--accent); background: transparent; }
+#benchmark-scoreboard th button::after { content: " ↕"; color: var(--muted); }
+#benchmark-scoreboard th[aria-sort="ascending"] button::after { content: " ↑"; color: var(--accent); }
+#benchmark-scoreboard th[aria-sort="descending"] button::after { content: " ↓"; color: var(--accent); }
+.benchmark-results > summary { font-size: 1.16rem; }
+.benchmark-results > summary h2 { display: inline; }
+.benchmark-case, .benchmark-plot { padding: .65rem 0; margin: 0; border-top: 1px solid var(--line); }
+.benchmark-case > summary, .benchmark-plot > summary { font-weight: 650; }
+.benchmark-plot figure { margin: .6rem 0 0; }
+.benchmark-plot img { display: block; max-width: 100%; height: auto; border-radius: .35rem; }
+.benchmark-plot figcaption { margin-top: .4rem; font-size: .82rem; }
 .benchmark-results pre { max-height: 24rem; margin-bottom: 0; padding: .65rem; overflow: auto; background: var(--field); white-space: pre-wrap; overflow-wrap: anywhere; }
 .benchmark-review { padding: .55rem .7rem; margin-top: .55rem; background: var(--field); border-radius: .35rem; }
 #benchmark-error { color: var(--danger); }

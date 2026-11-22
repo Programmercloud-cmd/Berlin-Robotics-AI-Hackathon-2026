@@ -11,6 +11,7 @@ from eye.simulator import HOUR
 COMPLETIONS = {
     "product_view": ("product_page_requested", "product_viewed", "product_page_load_failed"),
     "cart_add": ("cart_add_requested", "cart_added", "cart_add_failed"),
+    "checkout": ("cart_added", "checkout_started", "checkout_start_failed"),
 }
 PAYMENT = ("payment_attempted", "payment_succeeded", "payment_declined", "payment_timed_out", "order_confirmed")
 SEARCH = ("search_requested", "feed_impression", "order_confirmed")

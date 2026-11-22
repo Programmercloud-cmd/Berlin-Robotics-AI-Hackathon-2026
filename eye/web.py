@@ -8,12 +8,16 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from psycopg.types.json import Jsonb
 
 from eye import investigation, runtime
 from eye.db import connect, state
 from eye.metric_catalog import CATALOG, LEGACY
 from eye.metric_readings import BERLIN, Facts, MAX_MATURITY, metric_readings
+from eye.metric_insights import DETECTION_OP, history as metric_history
+from eye.metric_policy import Cadence
 from eye.observation import make_mcp
+from eye.report_assembly import assemble_report
 
 STATIC = Path(__file__).with_name("static")
 
@@ -26,6 +30,11 @@ class MetricRegistration(BaseModel):
     dimensions: list[str] = Field(default_factory=list)
     access: dict = Field(default_factory=dict)
     direction: str = "both"
+    cadence_minutes: Cadence | None = None
+
+
+class MetricCadence(BaseModel):
+    cadence_minutes: Cadence | None = None
 
 
 def make_app(dsn, model=None):
@@ -57,9 +66,15 @@ def make_app(dsn, model=None):
             edges = db.execute(
                 "select * from graph_edges order by source, target, kind"
             ).fetchall()
-            return {
+            payload = {
                 "last_window": state(db, "last_window"),
                 "baseline_through": state(db, "baseline_through"),
+                "planned_events": db.execute("""select distinct on (series) * from planned_events
+                                               order by series, starts_at desc""").fetchall(),
+                "event_expectations": [row["reading"] for row in db.execute(
+                    """select reading from planned_event_readings where window_start=(select max(window_start) from planned_event_readings)
+                       and (scope='{}' or scope in (select scope from planned_events)) order by scope"""
+                ).fetchall()],
                 "graph": {
                     "nodes": db.execute("select * from graph_nodes order by id").fetchall(),
                     "edges": edges,
@@ -80,6 +95,9 @@ def make_app(dsn, model=None):
                                 i.opened_at desc, i.id desc limit 50""", (incident, incident),
                 ).fetchall(),
             }
+            for row in payload["incidents"]:
+                row["report"] = assemble_report(row["report"], row["id"], row["grouping_decisions"])
+            return payload
 
     @app.get("/api/events")
     def observed_events():
@@ -117,11 +135,23 @@ def make_app(dsn, model=None):
                 (ids,),
             ).fetchall()
 
+    @app.get("/api/incidents/{incident_id}/original-report")
+    def original_report(incident_id: int):
+        with connect(dsn) as db:
+            row = db.execute(
+                """select incident_id, written_at, observed_through, report from report_snapshots
+                   where incident_id = %s and phase = 'initial'""", (incident_id,),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(404, "Original report pending.")
+            return row
+
     @app.get("/api/catalog")
     def catalog():
         with connect(dsn) as db:
             rows = db.execute(
-                """select m.id, m.direction, latest.value, latest.details, latest.window_start
+                """select m.id, m.direction, m.access->'cadence_minutes' as cadence_minutes,
+                          latest.value, latest.details, latest.window_start
                    from metrics m left join lateral (
                        select value, details, window_start from observations o
                        where o.metric_id = m.id and o.scope = '{}' order by window_start desc limit 1
@@ -135,15 +165,43 @@ def make_app(dsn, model=None):
             entries.append({
                 **definition, "legacy_ids": [old for old, current in LEGACY.items() if current == identifier],
                 "registered": row is not None, "readings_available": bool(row and row["value"] is not None),
+                "cadence_minutes": (row or {}).get("cadence_minutes") or definition["access"]["cadence_minutes"],
                 "alerts_enabled": bool(row and row["direction"] != "none"), "latest": row,
             })
         return entries
 
+    @app.get("/api/metric-insights/{metric_id}")
+    def metric_insights(metric_id: str, scope: str = "{}", anchor: datetime | None = None, theme: str = "bright"):
+        with connect(dsn) as db:
+            metric = db.execute(f"select m.*, {DETECTION_OP} as op from metrics m where m.id=%s", (metric_id,)).fetchone()
+            if not metric:
+                raise HTTPException(404, "Metric is awaiting registration.")
+            try:
+                filters = json.loads(scope)
+                if (not isinstance(filters, dict) or not set(filters).issubset(metric["dimensions"])
+                        or not all(isinstance(value, str) for value in filters.values())):
+                    raise ValueError
+            except ValueError as exc:
+                raise HTTPException(422, "Use the metric's declared dimensions for scope.") from exc
+            return metric_history(db, metric, filters, utc(anchor) if anchor else None, theme)
+
     @app.post("/api/catalog/{metric_id}/register")
-    def register_catalog_metric(metric_id: str):
+    def register_catalog_metric(metric_id: str, policy: MetricCadence | None = None):
         if metric_id not in CATALOG:
             raise HTTPException(404, "Unknown catalog metric.")
-        return runtime.register(dsn, CATALOG[metric_id], model)
+        return runtime.register(dsn, {**CATALOG[metric_id], **(policy.model_dump() if policy else {})}, model)
+
+    @app.patch("/api/metrics/{metric_id}/cadence")
+    def update_cadence(metric_id: str, policy: MetricCadence):
+        if policy.cadence_minutes is None:
+            raise HTTPException(422, "Choose a check cadence.")
+        with connect(dsn) as db:
+            row = db.execute("""update metrics set access=jsonb_set(access,'{cadence_minutes}',%s)
+                                where id=%s returning id, access->'cadence_minutes' as cadence_minutes""",
+                             (Jsonb(policy.cadence_minutes), metric_id)).fetchone()
+            if not row:
+                raise HTTPException(404, "Register the metric before editing its cadence.")
+            return row
 
     @app.get("/api/catalog/{metric_id}/readings")
     def catalog_readings(metric_id: str, start: datetime | None = None, end: datetime | None = None,

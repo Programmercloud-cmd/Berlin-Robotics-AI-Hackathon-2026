@@ -14,12 +14,13 @@ const labWorkflow = (() => {
     ["cart_add_requested", "Add-to-cart request", 5, 4],
     ["cart_added", "Cart addition", 5, 5, 1, "cart_add"],
     ["stock_gate", "Stock available?", 5, 6, 1, null, "gate"],
-    ["checkout_started", "Checkout", 5, 7],
+    ["checkout_started", "Checkout", 5, 7, 1, "checkout"],
     ["payment_attempted", "Payment attempt", 5, 8, 1, "payment"],
     ["payment_succeeded", "Authorized", 5, 9, 1, "payment", "authorization"],
     ["order_confirmed", "Order confirmed", 5, 10],
     ["product_page_load_failed", "Page load fails", 6, 2, 1, "product_view", "outcome"],
     ["cart_add_failed", "Cart add fails", 6, 4, 1, "cart_add", "outcome"],
+    ["checkout_start_failed", "Checkout request fails", 6, 5, 1, "checkout", "outcome"],
     ["out_of_stock", "Checkout stops", 6, 6, 1, null, "outcome", "Out of stock"],
     ["payment_declined", "Declined", 6, 7, 1, "payment", "outcome"],
     ["payment_timed_out", "Gateway timeout", 6, 8, 1, "payment", "outcome"],
@@ -41,6 +42,7 @@ const labWorkflow = (() => {
     ["feed_impression", "product_page_requested", "bottom", "top", "journey-entry"],
     ["product_page_requested", "product_page_load_failed", "bottom", "top", "branch"],
     ["cart_add_requested", "cart_add_failed", "bottom", "top", "branch"],
+    ["cart_added", "checkout_start_failed", "bottom", "top", "branch"],
     ["stock_gate", "out_of_stock", "bottom", "top", "branch"],
     ["payment_attempted", "payment_declined", "bottom", "top", "branch"],
     ["payment_attempted", "payment_timed_out", "bottom", "top", "branch"],
@@ -51,6 +53,7 @@ const labWorkflow = (() => {
   const targets = {
     "reduce_completions/product_view": ["product_viewed", "product_page_load_failed"],
     "reduce_completions/cart_add": ["cart_added", "cart_add_failed"],
+    "reduce_completions/checkout": ["checkout_started", "checkout_start_failed"],
     "payment_timeout/payment": ["payment_timed_out"],
     "payment_success_delay/payment": ["success_receipt_in_transit"],
     "search_rollout/search": ["search_rollout"],
@@ -181,10 +184,14 @@ const labWorkflow = (() => {
       }
       values.order_paths = "Direct or assisted";
     } else {
-      const product = readings.transition === "product_view";
-      values[product ? "product_page_requested" : "cart_add_requested"] = count(counts.requested) + " sessions";
-      values[product ? "product_viewed" : "cart_added"] = rate(counts.completed, counts.requested) + " completed";
-      values[product ? "product_page_load_failed" : "cart_add_failed"] = count(counts.failed) + " failures";
+      const [requested, completed, failed] = {
+        product_view: ["product_page_requested", "product_viewed", "product_page_load_failed"],
+        cart_add: ["cart_add_requested", "cart_added", "cart_add_failed"],
+        checkout: ["cart_added", "checkout_started", "checkout_start_failed"],
+      }[readings.transition];
+      values[requested] = count(counts.requested) + " sessions";
+      values[completed] = rate(counts.completed, counts.requested) + " completed";
+      values[failed] = count(counts.failed) + " failures";
     }
     return values;
   }

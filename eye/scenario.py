@@ -20,7 +20,7 @@ class Scenario(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     effect: Literal["reduce_completions", "payment_timeout", "payment_success_delay", "search_rollout"]
-    transition: Literal["product_view", "cart_add", "payment", "search"]
+    transition: Literal["product_view", "cart_add", "checkout", "payment", "search"]
     scope: Scope = Field(default_factory=Scope)
     severity: float = Field(ge=0.1, le=0.95)
     duration_hours: int = Field(ge=1, le=24)
@@ -44,6 +44,7 @@ class Scenario(BaseModel):
         supported = {
             "product_view": {"reduce_completions"},
             "cart_add": {"reduce_completions"},
+            "checkout": {"reduce_completions"},
             "payment": {"payment_timeout", "payment_success_delay"},
             "search": {"search_rollout"},
         }
@@ -65,7 +66,8 @@ SCENARIO_PROMPT = """Plan experiments for a synthetic marketplace simulator.
 Use the latest request and prior chat. Keep the hypothetical premise in the plan.
 Use effect reduce_completions for fewer successful outcomes at a transition,
 either product_view (a page request reaches a successful product view) or
-cart_add (an add-to-cart request reaches a successful cart addition). Severity
+cart_add (an add-to-cart request reaches a successful cart addition) or checkout
+(a completed cart reaches checkout). Severity
 is the fraction of otherwise successful completions prevented at that transition.
 Use effect payment_timeout with transition payment and an absolute timeout probability.
 Use effect payment_success_delay with transition payment when successful payment

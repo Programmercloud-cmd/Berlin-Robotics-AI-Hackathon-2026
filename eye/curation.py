@@ -1,13 +1,16 @@
 from psycopg.types.json import Jsonb
 
 from eye.graph import attach_measures, calculation_activities, put_edge, put_node
+from eye.metric_policy import CADENCES, default_cadence
 from eye.model import ask
 
 
 CURATOR_PROMPT = """You curate metric definitions for a marketplace monitoring graph.
 Use only the provided metric, observed graph and existing metric definitions.
 Choose a small number of useful target nodes. Return a JSON object like
-{"relationships":[{"target":"node identifier","kind":"measures","reason":"brief evidence"}]}.
+{"relationships":[{"target":"node identifier","kind":"measures","reason":"brief evidence"}],"cadence_minutes":60}.
+Recommend a check cadence of 5, 15, 30, 60, 360 or 1440 virtual minutes from the metric's definition,
+expected sample size, operational urgency and reporting period. Echo a supplied cadence.
 Use measures for an activity or process the metric quantifies. Use depends_on
 for a plausible operational dependency, or may_influence for a plausible downstream
 effect. Mark uncertainty in your reasoning. Do not assert causal or statistical proof,
@@ -41,7 +44,7 @@ def curate(db, metric, model=None):
         "definition": metric["definition"],
         "calculation": metric["calculation"],
         "dimensions": metric.get("dimensions", []),
-        "access": metric.get("access", {}),
+        "access": dict(metric.get("access", {})),
         "direction": metric.get("direction", "both"),
     }
     calculation = definition["calculation"]
@@ -56,8 +59,13 @@ def curate(db, metric, model=None):
         "select id, name, definition, calculation, dimensions, access from metrics where id <> %s order by id",
         (metric_id,),
     ).fetchall()
+    policy_access = dict(definition["access"])
+    if metric.get("infer_cadence"):
+        policy_access.pop("cadence_minutes", None)
+    if metric.get("cadence_minutes") is not None:
+        policy_access["cadence_minutes"] = metric["cadence_minutes"]
     context = {
-        "new_metric": definition,
+        "new_metric": {**definition, "access": policy_access},
         "nodes": [{"id": node["id"], "kind": node["kind"], "label": node["label"]}
                   for node in nodes.values()],
         "existing_metrics": existing,
@@ -67,6 +75,14 @@ def curate(db, metric, model=None):
         ).fetchall(),
     }
     proposal, provenance = ask(model, "curation", CURATOR_PROMPT, context)
+    previous = db.execute("select access from metrics where id=%s", (metric_id,)).fetchone()
+    suggested = proposal.get("cadence_minutes")
+    explicit = metric.get("cadence_minutes")
+    cadence = explicit if explicit is not None else (previous or {}).get("access", {}).get("cadence_minutes")
+    if cadence is None:
+        cadence = (suggested if metric.get("infer_cadence") and type(suggested) is int and suggested in CADENCES else
+                   definition["access"].get("cadence_minutes", default_cadence(definition)))
+    definition["access"]["cadence_minutes"] = cadence
 
     db.execute(
         """insert into metrics (id, name, definition, calculation, dimensions, access, direction)

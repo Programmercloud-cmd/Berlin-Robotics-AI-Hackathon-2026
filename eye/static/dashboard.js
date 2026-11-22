@@ -80,6 +80,10 @@ let nodes = new Map();
 let graphKey = "";
 let catalog = [];
 let catalogKey = "";
+const catalogCadence = new Map();
+const catalogRegistrations = new Map();
+const cadenceLabels = new Map([[5, "Every 5 min"], [15, "Every 15 min"], [30, "Every 30 min"],
+  [60, "Hourly"], [360, "Every 6 hours"], [1440, "Daily"]]);
 let selectedIncident = null;
 const incidentRows = new Map();
 let graphEvidenceIncident = null;
@@ -367,8 +371,15 @@ function renderInspector(relationships) {
   const title = node?.label || words(selectedEdge.kind);
   const detail = node ? words(node.kind) + " · " + relationships + (relationships === 1 ? " relationship" : " relationships") :
     name(selectedEdge.source) + " → " + name(selectedEdge.target) + " · " + selectedEdge.provenance;
-  if (inspector.firstElementChild?.textContent !== title || inspector.lastElementChild?.textContent !== detail) {
+  if (inspector.firstElementChild?.textContent !== title || inspector.querySelector("p")?.textContent !== detail) {
     inspector.replaceChildren(element("strong", title), element("p", detail, "panel-meta"));
+    if (node?.kind === "metric") {
+      const view = element("button", "View metric", "text-control");
+      view.type = "button";
+      view.setAttribute("aria-haspopup", "dialog");
+      view.addEventListener("click", () => openMetricInsights(selectedNode.replace(/^metric:/, "")));
+      inspector.append(view);
+    }
   }
 }
 
@@ -485,6 +496,38 @@ function reportSection(container, label, content) {
   container.append(section);
 }
 
+function eventComparison(reading) {
+  return `${number(reading.observed)} observed orders in ${scope(reading.scope)} · ${number(reading.normal)} normally expected · ` +
+    `${number(reading.adjusted)} expected for the event. Estimated range ${number(reading.lower)}–${number(reading.upper)}.`;
+}
+
+function renderPlannedEvents(events, readings) {
+  const panel = byId("planned-events"), target = byId("planned-event-readings");
+  panel.hidden = !events.length;
+  const key = JSON.stringify([events, readings]);
+  if (key === target.dataset.key) return;
+  target.dataset.key = key;
+  target.replaceChildren();
+  for (const event of events) {
+    target.append(element("h3", event.name),
+      element("p", `${date(event.starts_at)}–${date(event.ends_at)} UTC · ${scope(event.scope)}`, "panel-meta"));
+    const comparisons = readings.filter((reading) => reading.event === event.name);
+    if (!comparisons.length) continue;
+    target.append(element("p", alertWindow(comparisons[0].window_start), "panel-meta"));
+    for (const reading of comparisons) {
+      target.append(element("p", eventComparison(reading) + ` ${words(reading.status)}.`));
+    }
+    const history = element("details");
+    history.append(element("summary", "How Eye estimated the uplift"),
+      element("p", "One previous occurrence. The range allows for variation in comparable days and the uncertainty of using a single event."));
+    for (const prior of comparisons[0].history) {
+      history.append(element("p", `${scope(prior.scope)} · ${number(prior.observed)} previous event orders vs ` +
+        `${number(prior.expected)} estimated ordinary orders using ${prior.control_days} same-weekday control days and their trend.`));
+    }
+    target.append(history);
+  }
+}
+
 function describe(value) {
   if (typeof value !== "object" || value === null) return String(value ?? "—").replace(/\b\d+:event-\d+\b/g, "[event in evidence]");
   if (Array.isArray(value)) return value.map(describe).join(", ");
@@ -528,6 +571,7 @@ function renderEvidenceBranches(target, report, openBranches) {
 function renderReport(target, incident) {
   const previousEvidence = target.querySelector(".evidence-list");
   const previousAlerts = target.querySelector(".related-alerts");
+  const previousHistory = target.querySelector(".report-history");
   const openBranches = new Map(Array.from(target.querySelectorAll(".evidence-branch"),
     (branch) => [branch.dataset.title, branch.open]));
   const focused = target.contains(document.activeElement) ? document.activeElement : null;
@@ -542,6 +586,8 @@ function renderReport(target, incident) {
     target.append(pending);
   }
   reportSection(target, "First observable break", report.first_observable_break);
+  if (report.planned_event) reportSection(target, report.planned_event.event, eventComparison(report.planned_event));
+  reportSection(target, "Conclusion", report.conclusion);
   reportSection(target, "Likely causes", report.likely_causes);
   reportSection(target, "Business impact", report.impact);
   reportSection(target, "Uncertainty", report.uncertainty);
@@ -581,6 +627,7 @@ function renderReport(target, incident) {
   }
   reportDisclosure(target, previousAlerts, "Related alerts", "related-alerts", (body) => loadRelatedAlerts(incident.id, body));
   reportDisclosure(target, previousEvidence, "View evidence", "evidence-list", (body) => loadEvidence(incident.id, body));
+  reportDisclosure(target, previousHistory, "Report history", "report-history", (body) => loadOriginalReport(incident.id, body));
   if (focused?.isConnected) focused.focus({ preventScroll: true });
 }
 
@@ -595,6 +642,34 @@ function reportDisclosure(target, previous, title, className, load) {
   }
   target.append(details);
   if (details.open) load(details.lastElementChild);
+}
+
+async function loadOriginalReport(id, target) {
+  if (target.dataset.loaded || target.dataset.loading) return;
+  target.dataset.loading = "true";
+  target.replaceChildren(element("p", "Loading original report…", "placeholder"));
+  try {
+    const response = await fetch(`/api/incidents/${id}/original-report`, { cache: "no-store" });
+    if (response.status === 404) {
+      target.replaceChildren(element("p", "Original report pending.", "placeholder"));
+      return;
+    }
+    if (!response.ok) throw new Error("Original report unavailable");
+    const { report, written_at, observed_through } = await response.json();
+    target.replaceChildren(element("h3", "Original report"),
+      element("p", "Saved " + date(written_at) + " UTC", "panel-meta"));
+    if (observed_through) target.append(element("p", "Observations through " + date(observed_through) + " UTC", "panel-meta"));
+    target.append(element("p", describe(report.summary)));
+    reportSection(target, "First observable break", report.first_observable_break);
+    reportSection(target, "Likely causes", report.likely_causes);
+    reportSection(target, "Business impact", report.impact);
+    reportSection(target, "Uncertainty", report.uncertainty);
+    target.dataset.loaded = "true";
+  } catch {
+    target.replaceChildren(element("p", "Original report is temporarily unavailable.", "placeholder"));
+  } finally {
+    delete target.dataset.loading;
+  }
 }
 
 async function loadEvidence(id, target) {
@@ -652,7 +727,8 @@ async function loadRelatedAlerts(id, target) {
       const metric = metricID(alert.metric_id);
       const button = element("button", name(metric), "anomaly-metric");
       button.type = "button";
-      button.addEventListener("click", () => inspectNode(metric, true));
+      button.setAttribute("aria-haspopup", "dialog");
+      button.addEventListener("click", () => openMetricInsights(alert.metric_id, alert));
       const unit = catalog.find((item) => item.id === alert.metric_id)?.access.unit;
       const relationship = alert.kind === "anomaly" ? "Initial alert" : alert.relationship;
       const score = alert.score == null ? null : "score " + number(alert.score);
@@ -691,6 +767,12 @@ function renderCatalog() {
     if (metric.registered) {
       const link = element("a", metric.name);
       link.href = "/api/catalog/" + encodeURIComponent(metric.id) + "/readings";
+      link.setAttribute("aria-haspopup", "dialog");
+      link.addEventListener("click", (event) => {
+        if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        openMetricInsights(metric.id);
+      });
       title.append(link);
     } else title.append(element("span", metric.name));
     if (relevant(metric)) title.append(element("span", " · Selected incident metric", "visually-hidden"));
@@ -705,8 +787,42 @@ function renderCatalog() {
         : new Intl.NumberFormat(undefined, { maximumFractionDigits: 3 }).format(metric.latest.value);
       reading.append(element("small", value + " · " + date(metric.latest.window_start) + " UTC"));
     } else if (metric.latest?.details?.quality) reading.append(element("small", words(metric.latest.details.quality)));
-    tr.append(title, element("td", metric.access.source, "catalog-source"), dims, reading,
-      element("td", metric.alerts_enabled ? "Enabled" : "Disabled"));
+    const policy = element("td", metric.alerts_enabled ? cadenceLabels.get(metric.cadence_minutes) || "Enabled" : "");
+    if (!metric.registered) {
+      const select = element("select");
+      select.setAttribute("aria-label", "Check cadence for " + metric.name);
+      select.append(new Option("Infer cadence", ""), ...Array.from(cadenceLabels, ([value, label]) => new Option(label, value)));
+      select.value = catalogCadence.get(metric.id) ?? "";
+      select.addEventListener("change", () => catalogCadence.set(metric.id, select.value));
+      const pending = catalogRegistrations.get(metric.id);
+      const register = element("button", pending === "pending" ? "Registering…" : "Register");
+      register.type = "button";
+      select.disabled = register.disabled = pending === "pending";
+      register.addEventListener("click", async () => {
+        catalogRegistrations.set(metric.id, "pending");
+        catalogKey = "";
+        renderCatalog();
+        try {
+          const value = catalogCadence.get(metric.id);
+          const response = await fetch(`/api/catalog/${encodeURIComponent(metric.id)}/register`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cadence_minutes: value ? Number(value) : null }),
+          });
+          if (!response.ok) throw new Error();
+          catalogRegistrations.delete(metric.id);
+          catalogCadence.delete(metric.id);
+          await refreshCatalog(false);
+        } catch {
+          catalogRegistrations.set(metric.id, "Registration failed.");
+        } finally {
+          catalogKey = "";
+          renderCatalog();
+        }
+      });
+      policy.append(select, register);
+      if (pending && pending !== "pending") policy.append(element("small", pending));
+    } else if (!metric.alerts_enabled) policy.textContent = "Disabled";
+    tr.append(title, element("td", metric.access.source, "catalog-source"), dims, reading, policy);
     rows.append(tr);
   }
   if (!shown.length) {
@@ -718,7 +834,7 @@ function renderCatalog() {
   }
 }
 
-async function refreshCatalog() {
+async function refreshCatalog(poll = true) {
   try {
     const response = await fetch("/api/catalog", { cache: "no-store" });
     if (response.ok) {
@@ -730,7 +846,7 @@ async function refreshCatalog() {
   } catch {
     if (!catalog.length) byId("catalog-count").textContent = "Catalog temporarily unavailable";
   } finally {
-    setTimeout(refreshCatalog, 3000);
+    if (poll) setTimeout(refreshCatalog, 3000);
   }
 }
 
@@ -742,9 +858,11 @@ async function refresh() {
     byId("status-dot").classList.add("connected");
     byId("status").textContent = snapshot.last_window ? "Monitoring" : "Waiting for baseline";
     byId("window").textContent = snapshot.last_window ? date(snapshot.last_window) + " UTC" : "—";
+    renderPlannedEvents(snapshot.planned_events || [], snapshot.event_expectations || []);
     syncGraph(snapshot.graph);
     renderIncidents();
     refreshActivityGraph();
+    if (typeof refreshMetricInsights === "function") refreshMetricInsights();
     updateActivitySelection();
     applyView();
   } catch (error) {
@@ -960,6 +1078,10 @@ function zoomBy(factor) {
 byId("zoom-in").addEventListener("click", () => zoomBy(1.2));
 byId("zoom-out").addEventListener("click", () => zoomBy(1 / 1.2));
 cy.on("tap", "node", (event) => inspectNode(selectedNode === event.target.id() ? null : event.target.id()));
+cy.on("dbltap", 'node[kind = "metric"]', (event) => {
+  inspectNode(event.target.id());
+  openMetricInsights(event.target.id().replace(/^metric:/, ""));
+});
 cy.on("tap", (event) => { if (event.target === cy) inspectNode(null); });
 cy.on("tap", "edge", (event) => {
   selectedEdge = snapshot.graph.edges.find((edge) =>

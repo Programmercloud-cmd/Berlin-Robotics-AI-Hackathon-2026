@@ -23,6 +23,7 @@ const transitions = {
   search: "Search request → search results",
   product_view: "Product page request → successful product view",
   cart_add: "Add-to-cart request → successful cart addition",
+  checkout: "Cart addition → checkout start",
   payment: "Payment attempt → payment outcome",
 };
 const phases = {
@@ -143,14 +144,15 @@ function renderPreview() {
   const target = byId("plan-preview");
   const item = state.messages?.find((message) => message.id === previewId && message.scenario);
   const replay = state.runs?.some((run) => run.plan_id === previewId);
-  const key = JSON.stringify([item, replay, state.busy, state.phase]);
+  const continuous = state.runs?.some((run) => run.continuous && active(run));
+  const key = JSON.stringify([item, replay, state.busy, state.phase, continuous, state.can_inject]);
   if (key === previewKey) return;
   previewKey = key;
   target.replaceChildren();
   target.hidden = !item;
   if (!item) return;
-  const apply = element("button", replay ? "Apply replay to upcoming windows" : "Apply to upcoming windows");
-  apply.disabled = state.phase !== "ready" || state.busy;
+  const apply = element("button", continuous ? "Inject into live traffic" : replay ? "Apply replay to upcoming windows" : "Apply to upcoming windows");
+  apply.disabled = state.phase !== "ready" || (state.busy && !state.can_inject);
   apply.addEventListener("click", async () => {
     apply.disabled = true;
     const response = await action("/api/plans/" + item.id + "/apply");
@@ -172,6 +174,7 @@ function renderPreview() {
   const actions = element("div", null, "inline");
   actions.append(apply, exportButton, close);
   target.append(element("h3", replay ? "Replay preview" : "Scenario preview"), fields(planFields(item.scenario, item.id)), actions);
+  if (state.can_inject) target.append(element("p", "The scenario starts at the next unpublished virtual hour. Traffic keeps streaming."));
 }
 
 function renderObservations(target, readings, run) {
@@ -336,10 +339,15 @@ function renderRuns() {
   target.replaceChildren();
   for (const run of runs) {
     const box = element("article", null, "run");
-    box.append(element("h3", run.scenario ? "Scenario timeline" : "Normal traffic"));
-    if (run.status === "failed") box.append(element("p", "The simulator stopped publishing this run."));
-    else box.append(element("p", run.status === "queued" ? "Queued." :
-      run.published + " of " + run.total + " virtual windows published."));
+    box.append(element("h3", run.injected ? "Injected scenario" : run.scenario ? "Scenario timeline" : run.continuous ? "Continuous traffic" : "Normal traffic"));
+    if (run.status === "queued") box.append(element("p", "Queued."));
+    else if (run.status === "failed") box.append(element("p", "The simulator stopped publishing this run."));
+    else if (run.continuous) {
+      const injected = runs.some((item) => item.injected && active(item));
+      const status = !active(run) ? "Stopped." : run.stop_requested ?
+        (injected ? "Stopping after the injected scenario." : "Stopping after the current hour.") : "Streaming.";
+      box.append(element("p", status + " " + run.published + " virtual windows published."));
+    } else box.append(element("p", run.published + " of " + run.total + " virtual windows published."));
     if (run.scenario) {
       box.append(element("h4", "Applied plan"), fields(planFields(run.scenario, run.plan_id)), renderTimeline(run));
       const result = run.evaluation || {};
@@ -361,7 +369,9 @@ function renderRuns() {
       }
       box.append(actions);
     } else if (run.start_at) {
-      box.append(fields([["Start", time(run.start_at)], ["End", time(run.end_at)]]));
+      const bounds = [["Start", time(run.start_at)]];
+      if (run.end_at) bounds.push(["End", time(run.end_at)]);
+      box.append(fields(bounds));
     }
     target.append(box);
   }
@@ -386,6 +396,13 @@ async function refresh() {
     byId("send").disabled = sending || pending || !state.devin_enabled;
     byId("send").textContent = pending ? "Devin is interpreting…" : state.devin_enabled ? "Ask Devin" : "Devin credentials required";
     byId("generate").disabled = state.phase !== "ready" || state.busy;
+    const continuous = state.runs.find((run) => run.continuous && active(run));
+    byId("start-continuous").hidden = Boolean(continuous);
+    byId("start-continuous").disabled = state.phase !== "ready" || state.busy;
+    const stopTraffic = byId("stop-continuous");
+    stopTraffic.hidden = !continuous;
+    stopTraffic.disabled = state.phase !== "ready" || Boolean(continuous?.stop_requested);
+    stopTraffic.textContent = continuous?.stop_requested ? "Stopping…" : "Stop continuous traffic";
     const newest = [...state.messages].reverse().find((item) => item.scenario);
     if (newest && newest.id !== latestPlan) {
       latestPlan = newest.id;
@@ -418,6 +435,8 @@ byId("normal").addEventListener("submit", (event) => {
   event.preventDefault();
   action("/api/normal", { hours: byId("hours").valueAsNumber });
 });
+byId("start-continuous").addEventListener("click", () => action("/api/normal/continuous", {}));
+byId("stop-continuous").addEventListener("click", () => action("/api/normal/stop", {}));
 byId("replay").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {

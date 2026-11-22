@@ -22,24 +22,45 @@
   </header>
   <main class="shell">
     <section class="panel" aria-labelledby="scores">
-      <div class="workflow-heading">
-        <h2 id="scores">Scoreboard</h2>
-        <button id="benchmark-start" type="button" disabled>Run benchmark</button>
-      </div>
+      <h2 id="scores">Scoreboard</h2>
+      <form id="benchmark-launch">
+        <label for="benchmark-description">Run description (optional)</label>
+        <div class="inline">
+          <input id="benchmark-description" type="text" maxlength="240" placeholder="What changed or what are you testing?">
+          <button id="benchmark-start" type="submit" disabled>Run benchmark</button>
+        </div>
+      </form>
       <p id="benchmark-status" role="status">Checking the checkout.</p>
       <p id="benchmark-error" role="alert" hidden></p>
       <div class="workflow-table">
-        <table>
-          <thead><tr><th scope="col">Run</th><th scope="col">Commit</th><th scope="col">Suite and seed</th><th scope="col">Eye reasoning</th><th scope="col">Cases</th><th scope="col">Fault cases alerted</th><th scope="col">False incidents</th><th scope="col">Incidents</th><th scope="col">Reviews</th></tr></thead>
+        <table id="benchmark-scoreboard">
+          <thead><tr>
+            <th scope="col" aria-sort="descending"><button type="button" data-sort="started_at" data-descending>Run</button></th>
+            <th scope="col"><button type="button" data-sort="sha">Commit</button></th>
+            <th scope="col"><button type="button" data-sort="suite">Suite and seed</button></th>
+            <th scope="col"><button type="button" data-sort="model">Eye reasoning</button></th>
+            <th scope="col"><button type="button" data-sort="completed" data-descending>Cases</button></th>
+            <th scope="col"><button type="button" data-sort="detected" data-descending>Fault cases alerted</button></th>
+            <th scope="col"><button type="button" data-sort="false_incidents">False incidents</button></th>
+            <th scope="col"><button type="button" data-sort="incidents">Incidents</button></th>
+            <th scope="col"><button type="button" data-sort="reviewed" data-descending>Reviews</button></th>
+            <th scope="col"><button type="button" data-sort="median_detection_minutes">Median detection</button></th>
+            <th scope="col"><button type="button" data-sort="median_recovery_minutes">Median recovery</button></th>
+          </tr></thead>
           <tbody id="benchmark-runs"></tbody>
         </table>
       </div>
     </section>
-    <section class="panel benchmark-results" id="benchmark-results" aria-labelledby="benchmark-results-title" hidden>
-      <h2 id="benchmark-results-title">Case results</h2>
+    <details class="panel benchmark-results" id="benchmark-results" hidden>
+      <summary><h2>Case results</h2></summary>
       <p id="benchmark-run-meta"></p>
+      <details id="benchmark-methodology" class="benchmark-case">
+        <summary>Run description and methodology</summary>
+        <div id="benchmark-methodology-fields"></div>
+      </details>
+      <div id="benchmark-plots"></div>
       <div id="benchmark-cases"></div>
-    </section>
+    </details>
   </main>
 </body>
 </html>
