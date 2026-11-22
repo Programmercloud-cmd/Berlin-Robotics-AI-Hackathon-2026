@@ -7,7 +7,7 @@ import uvicorn
 from dotenv import load_dotenv
 
 from eye.lab import make_lab_app
-from rehearsal.__main__ import EYE_PORT, LAB_PORT
+from rehearsal.__main__ import EYE_PORT, LAB_PORT, SUPPORT_PORT
 
 
 def main():
@@ -15,7 +15,8 @@ def main():
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     args = parser.parse_args()
     load_dotenv(args.env_file)
-    uvicorn.run(make_lab_app(eye_port=EYE_PORT), host="127.0.0.1", port=LAB_PORT, access_log=False)
+    uvicorn.run(make_lab_app(eye_port=EYE_PORT, support_port=SUPPORT_PORT),
+                host="127.0.0.1", port=LAB_PORT, access_log=False)
 
 
 if __name__ == "__main__":

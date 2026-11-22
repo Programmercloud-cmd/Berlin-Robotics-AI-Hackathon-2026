@@ -1,18 +1,20 @@
 """Serve the local walkthrough and evidence from a completed Devin-led replay."""
 
+import argparse
 import json
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from math import comb, fsum, sqrt
 from pathlib import Path
 from statistics import pstdev
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
 EYE_PORT = 8010
 LAB_PORT = 8012
+SUPPORT_PORT = 8014
 REPLAY_EYE = "http://127.0.0.1:8047"
-PREVIEW_LAB = "http://127.0.0.1:8042"
+PREVIEW_LAB = f"http://127.0.0.1:{LAB_PORT}"
 REPLAY_FILE = HERE.parent / ".runtime" / "feature-replay.json"
 FILES = {
     "/": ("index.html", "text/html"),
@@ -49,7 +51,7 @@ def detection_details(alert_context):
     }
 
 
-def replay_summary(replay):
+def replay_summary(replay, eye_url=REPLAY_EYE):
     incident = replay["final"]["incident"]
     report = incident["report"]
     rows = replay["final"]["evidence"]
@@ -77,10 +79,6 @@ def replay_summary(replay):
         for row in rows if row["kind"] == "recovery observation"
     ][-incident["healthy_windows"]:]
     conclusion = next(row for row in rows if row["kind"] == "investigation conclusion")
-    query = urlencode({
-        "start": trigger["window_start"], "end": trigger["window_end"],
-        "as_of": trigger["observed_at"], "scope": json.dumps(incident["scope"]),
-    })
     return {
         "seed": replay["seed"],
         "incident": incident["id"],
@@ -88,9 +86,9 @@ def replay_summary(replay):
         "opened_pending": replay["at_detection"]["pending"],
         "recovered_pending": replay["at_recovery"]["pending"],
         "recovered_at": report["recovery_observed_at"],
-        "dashboard": f"{REPLAY_EYE}/?incident={incident['id']}",
+        "dashboard": f"{eye_url}/?incident={incident['id']}",
         "lab_preview": PREVIEW_LAB + "/#chat-title",
-        "readings_url": f"{REPLAY_EYE}/api/catalog/{incident['metric_id']}/readings?{query}",
+        "readings_url": f"/evidence/{evidence_id(contexts['alert'])}",
         "alert": trigger,
         "detection": detection_details(alert_context),
         "grouping": [
@@ -122,11 +120,14 @@ def replay_summary(replay):
         "citations": report["evidence_ids"],
         "alternative": report["alternative"],
         "stop_reason": report["stop_reason"],
-        "report_url": f"{REPLAY_EYE}/api/incidents/{incident['id']}/original-report",
+        "report_url": "/evidence/report",
     }
 
 
 class Handler(BaseHTTPRequestHandler):
+    replay_file = REPLAY_FILE
+    eye_url = REPLAY_EYE
+
     def do_GET(self):
         path = urlsplit(self.path).path
         if path in FILES:
@@ -134,12 +135,15 @@ class Handler(BaseHTTPRequestHandler):
             self.reply((HERE / name).read_bytes(), content_type)
             return
         try:
-            replay = json.loads(REPLAY_FILE.read_text())
+            replay = json.loads(self.replay_file.read_text())
         except (FileNotFoundError, json.JSONDecodeError):
             self.send_error(503, "Recorded replay unavailable")
             return
         if path == "/api/replay":
-            self.reply_json(replay_summary(replay))
+            self.reply_json(replay_summary(replay, self.eye_url))
+            return
+        if path == "/evidence/report":
+            self.reply_json(replay["final"]["incident"]["report"])
             return
         if path == "/evidence/recovery":
             self.reply_json({
@@ -167,7 +171,18 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-if __name__ == "__main__":
-    with ThreadingHTTPServer(("127.0.0.1", 8003), Handler) as server:
-        print("Eye rehearsal · http://127.0.0.1:8003/", flush=True)
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--port", type=int, default=8003)
+    parser.add_argument("--replay-file", type=Path, default=REPLAY_FILE)
+    parser.add_argument("--eye-url", default=REPLAY_EYE, help="Live Eye dashboard for the captured incident")
+    args = parser.parse_args()
+    Handler.replay_file = args.replay_file
+    Handler.eye_url = args.eye_url.rstrip("/")
+    with ThreadingHTTPServer(("127.0.0.1", args.port), Handler) as server:
+        print(f"Eye rehearsal · http://127.0.0.1:{args.port}/", flush=True)
         server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

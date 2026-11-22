@@ -31,6 +31,12 @@ Open the [Marketplace tab](http://127.0.0.1:8002/) or the [Support Tickets tab](
 
 To rehearse alongside a running marketplace demo, pass `--port 8066 --eye-port 8065 --support-port 8067` to the same command. The operator continues to use 8001.
 
+### Recorded walkthrough
+
+Run `python -m rehearsal --replay-file /path/to/evidence.json` to open the [presentation on port 8003](http://127.0.0.1:8003). Use a completed marketplace capture from the Devin replay below that includes the scoped activity comparison, timeout event sample, and payment workflow edge. The default capture path is `.runtime/feature-replay.json`. The presentation serves saved readings and reports from that file. Pass `--eye-url` to point live incident links at the Eye server for the recorded run.
+
+Run `python -m rehearsal.lab` to open a separate [rehearsal Lab on port 8012](http://127.0.0.1:8012), with Marketplace Eye on 8010 and Support Eye on 8014.
+
 ## Metric catalog
 
 Eye’s **Metric catalog** lists all 36 definitions, their data sources, units, dimensions, latest reading availability, and alert settings. The 33 baseline metrics register at startup. `payment_timeout_rate`, `unavailable_feed_share`, and `marketplace_contribution` remain available for separate runtime registration. The payment regression registers `payment_timeout_rate` after detection. Use `POST /api/catalog/{metric_id}/register` to register a catalog metric or `POST /api/metrics` to register a custom calculation.
@@ -85,7 +91,7 @@ Add a **Run description** before starting to record the change or question you a
 
 ## Live reasoning
 
-The existing marketplace investigation and grouping remain the default. Opt in to the shared investigation policy with `EYE_INVESTIGATION=generic EYE_MODEL=devin`. Set both variables before launching the lab or Eye server. The feature branch starts from Eye commit `66c414f29a283699e87ce3df8bf11b22b34160db`.
+The existing marketplace investigation and grouping remain the default. Opt in to the shared investigation policy with `EYE_INVESTIGATION=generic EYE_MODEL=devin`. Set both variables before launching the lab or Eye server.
 
 In shared mode, Eye opens the incident from observed measurements and gives Devin the alert, scoped historical readings, sample sizes, delivery completeness, and typed graph neighbours. Devin can select up to three local reads per batch, with at most two batches. It can compare event counts or decompose a declared ratio into observed numerator and denominator contributions with a residual. Eye stores the reads, their fixed observation cutoff, and the cited conclusion inside **View evidence**. It attempts to continue the same Devin session and starts a continuation with the same evidence if necessary. Monitoring and recovery run independently. If the model cannot return a valid cited report, Eye saves its statistical report.
 

@@ -301,7 +301,7 @@ const methods = {
       snippet: "Citations: " + d.citations.join(", ") + "\nDELETE " + currentSession + "\n" +
         "Recorded sessions: " + d.session_count + ". Transport endpoints are reconstructed from the implementation.",
       children: conclusionDetails(d),
-      links: [record(d.conclusion_evidence, "Conclusion, alternative and stop reason ↗"), ["Original report ↗", d.report_url]]
+      links: [record(d.conclusion_evidence, "Conclusion, alternative and stop reason ↗"), ["Saved incident report ↗", d.report_url]]
     },
     {
       id: "parallel", label: "In parallel · Verify recovery",
