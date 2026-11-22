@@ -44,7 +44,8 @@ SPIKE_Z, CUSUM_K, CUSUM_H, RECOVER_HOURS, LOOKBACK_H = 4.5, 1.0, 8.0, 3, 6
 CAMPAIGN_DEFAULT_HOURS = 24        # Event has no end time in the contract: campaigns are assumed to last a day
 KEY_METRICS = ["contribution", "gmv", "orders", "conversion_rate", "payment_success_rate", "sessions"]
 SCAN_FDR_Q, SCAN_PHI, SCAN_MIN_REL = 1e-3, 2.0, 0.10
-DEFAULT_FEATURES = {"scan": True, "riskloc": True, "process": True, "learning": True}
+DEFAULT_FEATURES = {"scan": True, "riskloc": True, "process": True, "learning": True,
+                    "bfs": True}   # bfs: the investigator's pruned graph search (v3); off = greedy v2 walk
 
 
 def seg_from_key(key: str) -> dict:

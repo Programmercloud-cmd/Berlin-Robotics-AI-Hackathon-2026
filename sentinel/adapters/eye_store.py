@@ -8,7 +8,8 @@ never touch this schema, and the agent never writes to `eye.*`.
   sentinel.observations  = eye.observations                                    (values of those metrics)
   sentinel.incidents     = eye.incidents    + fingerprint, state, label, first_cause, segment,
                                               impact_eur_total, hypotheses, report_md, alerted
-  sentinel.evidence      = eye.evidence     + evidence_key, step, query, interpretation
+  sentinel.evidence      = eye.evidence     + evidence_key, step, query, interpretation, signal, verdict
+                                              (payload: tool, params, window, entity, stats, numbers)
   sentinel.known_patterns  patterns investigations confirmed as normal (baseline corrections, v2)
   sentinel.bus_events      every event published on the agent's bus (audit trail / replay)
 """
@@ -78,6 +79,8 @@ create table if not exists sentinel.evidence (
     interpretation text,
     unique (incident_id, evidence_key)
 );
+alter table sentinel.evidence add column if not exists signal text;    -- v3 evidence anchoring
+alter table sentinel.evidence add column if not exists verdict text;
 
 create table if not exists sentinel.known_patterns (
     id bigint generated always as identity primary key,
@@ -185,8 +188,11 @@ class AgentStore:
             p = ev.payload
             self.db.execute(
                 """insert into sentinel.evidence (incident_id, window_start, kind, node_id, payload, evidence_key,
-                                                   step, query, interpretation)
-                   values (%s, %s, %s, %s, %s, %s, %s, %s, %s) on conflict (incident_id, evidence_key) do nothing""",
+                                                   step, query, interpretation, signal, verdict)
+                   values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   on conflict (incident_id, evidence_key) do nothing""",
                 (incident_id, ev.sim_ts, p.get("stage", "observation"), f"metric:{p.get('focus')}",
-                 Jsonb(json.loads(json.dumps(p.get("numbers", {}), default=str))), p.get("evidence_id"),
-                 p.get("stage"), p.get("query", ""), p.get("text", "")))
+                 Jsonb(json.loads(json.dumps({k: p.get(k) for k in ("numbers", "tool", "params", "window", "entity",
+                                                                     "stats")}, default=str))),
+                 p.get("evidence_id"), p.get("stage"), p.get("query", ""), p.get("text", ""), p.get("signal"),
+                 p.get("verdict")))

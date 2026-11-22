@@ -97,12 +97,30 @@ class Anomaly(BaseModel):
 
 
 class Evidence(BaseModel):
+    """One structured evidence record: written by deterministic code after every tool call."""
     id: str  # "E7"
     incident_id: str
-    step: Literal["data_check", "decompose", "localise", "events", "predict", "frontier"]
+    step: Literal["data_check", "decompose", "localise", "events", "predict", "frontier", "traverse"]
     query: str  # readable metric() call
     result: dict  # numbers only
     interpretation: str
+    # v3 evidence anchoring: what was asked, of which entity, over which window, and what the statistics say
+    tool: str = ""                 # e.g. decompose, drilldown, compare_control, causal_check, prune
+    params: dict = {}              # the tool call's parameters
+    window: list[str] = []         # [start, end] of the data slice
+    entity: str = ""               # metric[segment]
+    signal: str = ""               # decomposition | drilldown | control_test | event_match | causal_test |
+    #                                prune | process_mix | graph_structure | data_quality | riskloc | meta
+    stats: dict = {}               # z, p, share, lift, rel ... (numbers only)
+    verdict: str = ""              # anomalous | normal | confined | not_confined | ...
+
+
+class EvidenceLink(BaseModel):
+    """A hypothesis' prediction tied to the evidence records that tested it."""
+    prediction: str
+    result: Literal["confirmed", "refuted", "untestable"]
+    evidence_ids: list[str]
+    log_lr: float                  # contribution to the posterior (log likelihood ratio)
 
 
 class Hypothesis(BaseModel):
@@ -113,6 +131,8 @@ class Hypothesis(BaseModel):
     prior: float
     posterior: float
     status: Literal["open", "supported", "rejected"] = "open"
+    evidence: list[EvidenceLink] = []
+    score: float = 0.0             # deterministic hybrid score used for ranking (posterior x evidence diversity)
 
 
 class Incident(BaseModel):

@@ -100,3 +100,38 @@ def test_operator_feedback_learns_and_resolves(rt):
     rt.incidents.feedback(inc.id, "false_alarm")
     assert len(rt.monitor.learned) > n
     assert inc.state == "resolved" and inc.label == "explained"
+
+
+# ---------------------------------------------------------------- v3: pruned BFS + evidence anchoring
+def test_every_judgement_cites_existing_evidence(rt):
+    for case in rt.incidents.cases.values():
+        ids = {e.id for e in case.evidence}
+        for h in case.hyps:
+            assert len(h.evidence) == len(h.predictions), h.id
+            for link in h.evidence:
+                assert link.evidence_ids, (h.id, link.prediction)
+                assert set(link.evidence_ids) <= ids, (h.id, link.evidence_ids)
+
+
+def test_evidence_records_are_structured(rt):
+    recs = [e for c in rt.incidents.cases.values() for e in c.evidence]
+    assert recs
+    for e in recs:
+        assert e.tool and e.signal and e.entity and len(e.window) == 2, e.id
+
+
+def test_bfs_walk_prunes_normal_branches(rt):
+    walks = [c.notes["walk"] for c in rt.incidents.cases.values() if c.notes.get("walk", {}).get("visited")]
+    assert walks
+    assert any(w["pruned"] for w in walks), "normal neighbours should be pruned somewhere on day one"
+    pruned_records = [e for c in rt.incidents.cases.values() for e in c.evidence if e.signal == "prune"]
+    assert pruned_records
+    # a pruned metric is never expanded in the same walk
+    for w in walks:
+        assert not (set(w["pruned"]) & set(w["visited"][1:]) - set(w["anomalous"]))
+
+
+def test_report_cites_evidence_ids(rt):
+    p = next(e for e in rt.bus.of_type("FINAL_REPORT") if e.payload["first_cause"] == "payment_success_rate")
+    md = p.payload["report_md"]
+    assert "Supported by E" in md and "log-LR" in md

@@ -22,7 +22,15 @@ Investigator
   tool validity    tool calls that returned an observation
   tokens           0: the investigator's policy is deterministic (no LLM calls)
 
-  python -m sentinel.eval.evaluate                 all suite runs, v1 (features off) vs v2 (on)
+Graph walk and evidence (v3)
+  nodes visited / pruned   per investigation: nodes decomposed by the BFS / neighbours pruned as normal
+  secondary branches       anomalous branches off the first-cause chain (compound-incident candidates)
+  hypotheses               hypotheses formed per investigation (v3 forms them only on anomalous branches)
+  evidence anchoring       share of hypothesis judgements that cite existing evidence records
+  structured records       share of evidence records with tool, signal, window and entity filled
+
+  python -m sentinel.eval.evaluate                 all suite runs: v1 (monitor features off), v2 (on, greedy
+                                                   investigator walk), v3 (v2 + pruned BFS investigator)
   python -m sentinel.eval.evaluate --quick         one run per configuration
 """
 from __future__ import annotations
@@ -41,8 +49,9 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "state" / "eval"
 LIVE = pd.Timestamp("2026-10-26")
-CONFIGS = {"v1": {"scan": False, "riskloc": False, "process": False, "learning": False},
-           "v2": {"scan": True, "riskloc": True, "process": True, "learning": True}}
+CONFIGS = {"v1": {"scan": False, "riskloc": False, "process": False, "learning": False, "bfs": False},
+           "v2": {"scan": True, "riskloc": True, "process": True, "learning": True, "bfs": False},
+           "v3": {"scan": True, "riskloc": True, "process": True, "learning": True, "bfs": True}}
 DEFAULT_SCENARIOS = ["autumn_campaign", "late_partition", "android_payment_de", "ios_release", "for_you_model_shift"]
 
 
@@ -161,7 +170,7 @@ def score(rt, gt: dict, wall: dict) -> dict:
     opened = [e for e in bus if e.type == "INCIDENT_OPENED"]
     investigated = [i for i in incs.values() if any(e.incident_id == i.id and e.type == "ACTION" for e in bus)]
     actions = [e for e in bus if e.type == "ACTION"]
-    obs = [e for e in bus if e.type == "OBSERVATION"]
+    obs = [e for e in bus if e.type == "OBSERVATION" and not e.payload.get("derived")]   # tool-call results only
     mttr = []
     for e in opened:
         end = next((x for x in bus if x.incident_id == e.incident_id and x.type == "THOUGHT"
@@ -178,12 +187,33 @@ def score(rt, gt: dict, wall: dict) -> dict:
         "dead_end_rate": sum(e.type == "DEAD_END" for e in bus) / len(investigated) if investigated else None,
         "tool_validity": len(obs) / len(actions) if actions else None,
         "tokens": 0, "investigations": len(investigated), "wall_s": wall["run"],
+        **_v3_metrics(rt, bus, investigated),
         "matched": {k: {"alert_at": v.sim_ts, "incident": v.incident_id, "first_cause": incs[v.incident_id].first_cause,
                         "segment": incs[v.incident_id].segment, "label": incs[v.incident_id].label} for k, v in matched.items()},
         "false_alerts": [{"at": a.sim_ts, "first_cause": a.payload["first_cause"], "segment": a.payload["segment"]}
                          for a, ok in zip(alerts, alert_ok) if not ok],
     })
     return res
+
+
+def _v3_metrics(rt, bus, investigated) -> dict:
+    """Graph-walk and evidence-anchoring metrics (v3)."""
+    cases = [rt.incidents.cases[i.id] for i in investigated if i.id in rt.incidents.cases]
+    walks = [c.notes["walk"] for c in cases if c.notes.get("walk", {}).get("visited")]
+    links = [l for c in cases for h in c.hyps for l in h.evidence]
+    hyps = [h for c in cases for h in c.hyps]
+    ev_ids = {e.id for c in cases for e in c.evidence}
+    structured = [e for c in cases for e in c.evidence if e.tool and e.signal and e.window and e.entity]
+    n_ev = sum(len(c.evidence) for c in cases)
+    return {
+        "nodes_visited": sum(len(w["visited"]) for w in walks) / len(walks) if walks else None,
+        "nodes_pruned": sum(len(w["pruned"]) for w in walks) / len(walks) if walks else None,
+        "secondary_branches": sum(len(w["secondary"]) for w in walks) / len(walks) if walks else None,
+        "hypotheses_per_investigation": len(hyps) / len(cases) if cases else None,
+        "evidence_anchoring": (sum(bool(l.evidence_ids) and all(i in ev_ids for i in l.evidence_ids) for l in links)
+                               / len(links)) if links else None,
+        "structured_records": len(structured) / n_ev if n_ev else None,
+    }
 
 
 def run_one(item: dict, config: str, until: pd.Timestamp) -> dict:
@@ -230,15 +260,17 @@ def run_isolated(item: dict, config: str, until: pd.Timestamp) -> dict:
 
 
 KEYS = ["precision", "recall", "far", "innocent_far", "mttd_h", "trigger_rate", "top1_root_cause", "root_cause_recall",
-        "label_accuracy", "path_recall", "steps_per_investigation", "mttr_s", "dead_end_rate", "tool_validity", "tokens"]
+        "label_accuracy", "path_recall", "steps_per_investigation", "mttr_s", "dead_end_rate", "tool_validity", "tokens",
+        "nodes_visited", "nodes_pruned", "secondary_branches", "hypotheses_per_investigation", "evidence_anchoring",
+        "structured_records"]
 
 
 def aggregate(rows: list[dict]) -> dict:
     out = {}
     for cfg in CONFIGS:
         rs = [r for r in rows if r["config"] == cfg]
-        out[cfg] = {k: (sum(r[k] for r in rs if r[k] is not None) / max(1, sum(r[k] is not None for r in rs))
-                        if any(r[k] is not None for r in rs) else None) for k in KEYS}
+        out[cfg] = {k: (sum(r[k] for r in rs if r.get(k) is not None) / max(1, sum(r.get(k) is not None for r in rs))
+                        if any(r.get(k) is not None for r in rs) else None) for k in KEYS}
     return out
 
 
@@ -249,7 +281,8 @@ def fmt(k, v):
         return f"{v:.1f} h"
     if k in ("mttr_s",):
         return f"{v:.1f} s"
-    if k in ("steps_per_investigation", "trigger_rate"):
+    if k in ("steps_per_investigation", "trigger_rate", "nodes_visited", "nodes_pruned", "secondary_branches",
+             "hypotheses_per_investigation"):
         return f"{v:.2f}"
     if k == "tokens":
         return "0"
@@ -265,7 +298,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="sentinel.eval.evaluate")
     p.add_argument("--until", default="2026-10-27T14:00")
     p.add_argument("--quick", action="store_true")
-    p.add_argument("--configs", default="v1,v2")
+    p.add_argument("--configs", default="v1,v2,v3")
     p.add_argument("--in-process", action="store_true", help="run everything in this process (more memory)")
     p.add_argument("--resume", action="store_true", help="keep finished runs from results.json")
     a = p.parse_args(argv)
@@ -284,7 +317,7 @@ def main(argv=None):
             print(f"run {item['name']} [{cfg}] …", flush=True)
             r = runner(item, cfg, pd.Timestamp(a.until))
             rows.append(r)
-            print("   " + ", ".join(f"{k}={fmt(k, r[k])}" for k in KEYS[:9]), flush=True)
+            print("   " + ", ".join(f"{k}={fmt(k, r.get(k))}" for k in KEYS[:9]), flush=True)
             (OUT / "results.json").write_text(json.dumps(rows, indent=1, default=str), encoding="utf-8")
     agg = aggregate(rows)
     lines = ["| metric | " + " | ".join(CONFIGS) + " |", "|---|" + "---|" * len(CONFIGS)]

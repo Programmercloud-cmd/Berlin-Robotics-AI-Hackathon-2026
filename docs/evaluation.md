@@ -1,4 +1,4 @@
-# Evaluation: v1 vs v2 (fault injection with ground truth)
+# Evaluation: v1 vs v2 vs v3 (fault injection with ground truth)
 
 `python -m sentinel.eval.evaluate` replays the dev marketplace with known injected faults and scores the
 agent against the ground truth. Two configurations run on identical data:
@@ -7,6 +7,10 @@ agent against the ground truth. Two configurations run on identical data:
 |---|---|
 | **v1** | single-dimension baselines (spike + CUSUM) only, the agent as tagged `sentinel-agent-v1` |
 | **v2** | v1 + multi-dimensional **scan** (BH-FDR over dimension pairs) + **RiskLoc** clues handed to the investigator + **process** early warnings + **learning** (confirmed-normal patterns written back to the baseline) |
+| **v3** | v2 + investigator **pruned BFS** over the metric graph + **evidence anchoring** (structured evidence records, every judgement cites record ids) |
+
+Evidence anchoring changes no decision, so it is on in all three configurations (the v1 and v2 reports
+cite evidence too). The v2 vs v3 difference is the graph traversal alone.
 
 Each run executes in its own process (peak 0.40 GB for v1, 0.68 GB for v2), so the whole suite fits in
 about 1 GB of free memory. `--resume` continues from finished runs, `--quick` runs one scenario.
@@ -27,23 +31,31 @@ faulted segment (shares a key=value with it).
 
 ## Results
 
-| | metric | v1 | v2 |
-|---|---|---|---|
-| **Monitor** | precision (alerts that match a fault) | 79% | 75% |
-| | recall (faults alerted) | 100% | 100% |
-| | false alarm rate (per fault-free monitored hour) | 2% | 5% |
-| | innocent-change false alarm rate (planned changes paged) | 0% | 4% |
-| | **MTTD** (fault start -> first alert) | 4.8 h | **3.8 h** |
-| | trigger rate (investigations per live hour) | 0.46 | 0.54 |
-| **Investigator** | top-1 root cause (first cause and segment) | 89% | 89% |
-| | **root-cause recall** (compound faults, all causes found) | 89% | **100%** |
-| | label accuracy | 100% | 93% |
-| | **path recall** (true propagation path reproduced) | 15% | **31%** |
-| | steps per investigation | 9.09 | 9.14 |
-| | MTTR (alert -> concluded report, wall clock) | 1.3 s | 1.2 s |
-| | **dead-end rate** | 56% | **49%** |
-| | tool-call validity | 100% | 100% |
-| | LLM tokens | 0 | 0 |
+| | metric | v1 | v2 | v3 |
+|---|---|---|---|---|
+| **Monitor** | precision (alerts that match a fault) | 79% | 75% | 75% |
+| | recall (faults alerted) | 100% | 100% | 100% |
+| | false alarm rate (per fault-free monitored hour) | 2% | 5% | 5% |
+| | innocent-change false alarm rate (planned changes paged) | 0% | 4% | 4% |
+| | **MTTD** (fault start -> first alert) | 4.8 h | **3.8 h** | **3.8 h** |
+| | trigger rate (investigations per live hour) | 0.46 | 0.54 | 0.54 |
+| **Investigator** | top-1 root cause (first cause and segment) | 89% | 89% | 89% |
+| | **root-cause recall** (compound faults, all causes found) | 89% | **100%** | **100%** |
+| | label accuracy | 100% | 93% | 93% |
+| | **path recall** (true propagation path reproduced) | 15% | 31% | **37%** |
+| | tool calls per investigation | 10.4 | 10.5 | 10.8 |
+| | **hypotheses per investigation** | 2.11 | 2.05 | **1.82** |
+| | MTTR (alert -> concluded report, wall clock) | 1.4 s | 1.3 s | 1.4 s |
+| | dead-end rate | 56% | 49% | 49% |
+| | tool-call validity | 100% | 100% | 100% |
+| | LLM tokens | 0 | 0 | 0 |
+| **Graph walk (v3)** | nodes decomposed per investigation | – | – | 1.74 |
+| | neighbours pruned as normal per investigation | – | – | 2.27 |
+| | secondary anomalous branches per investigation | – | – | 0.38 |
+| **Evidence** | judgements citing existing evidence records | 100% | 100% | 100% |
+| | records with tool, signal, window and entity | 100% | 100% | 100% |
+
+Wall time for the whole suite: v1 248 s, v2 380 s, v3 353 s.
 
 ### Per run
 
@@ -55,6 +67,29 @@ faulted segment (shares a key=value with it).
 | fr-ios | v2 | 5 | payment **10-26 12:00** · for_you **10-27 12:00** | same two + orders (total) 10-27 06:00 |
 | es-web+supplier | v1 | 8 | supplier 10-26 21:00 (as *gmv, unexplained*) · payment 10-26 22:00 · for_you 10-27 12:00 | avg_order_value 21:00 |
 | es-web+supplier | v2 | 7 | supplier **10-26 19:00** (as *add_to_cart_rate, supported cause*) · payment **10-26 19:00** · for_you 10-27 12:00 | avg_order_value 21:00 |
+
+## What v3 changes (pruned BFS + evidence anchoring)
+
+* **Same accuracy, fewer hypotheses.** Detection, root cause and labels are identical to v2 on this suite;
+  v3 forms 11% fewer hypotheses (116 vs 130 over 62 investigations) because causal parents inside their
+  noise band are pruned before a hypothesis is formed, instead of being formed and then refuted.
+* **Better coverage of the propagation path** (31% -> 37%): the BFS decomposes every anomalous input that
+  carries at least 20% of the change, not only the largest one, so side branches of the true path are
+  visited. 0.38 secondary anomalous branches per investigation are reported as compound-incident candidates.
+* **Pruning is visible and auditable.** 2.27 neighbours per investigation are pruned with their branches;
+  each pruning is an evidence record ("pruned 3 normal inputs of contribution: ad_revenue (z=+0.8), ...").
+* **Cost.** 3% more tool calls per investigation (the extra decompositions of anomalous side branches),
+  7% less wall time than v2 (fewer causal tests with Granger regressions).
+* **Every conclusion is auditable.** Each hypothesis judgement cites the evidence records it was tested on
+  and its log-likelihood ratio; the report's leading explanation lists the supporting record ids. Records
+  carry tool, parameters, window, entity, signal type, statistics and verdict, and are persisted to
+  `sentinel.evidence` (columns `signal`, `verdict`, payload with the rest).
+
+Why the gains are smaller than in the literature (Praxis reports 6.3x accuracy, 5.3x fewer tokens over a
+ReAct baseline): those baselines let an LLM choose the next node. The v2 investigator was already a
+deterministic policy with zero tokens, so v3 cannot save tokens, and the greedy v2 walk made few invalid
+queries to begin with. What BFS adds here is coverage (side branches) and fewer hypotheses, not a jump
+in accuracy.
 
 ## What v2 changes
 
@@ -100,7 +135,8 @@ human.
   causes it. The rule is deliberate: before it, a planned campaign "explained" unrelated drops on timing
   alone.
 * **Small suite.** Three seeds and seven fault instances: one alert moves precision by about 5 points.
-  Treat differences below about 10 points as noise.
+  Treat differences below about 10 points as noise. The v2 -> v3 path-recall gain (+6 points) is within
+  that margin; the drop in hypotheses (-11%) is a count over 62 investigations and more robust.
 
 ## Fixes the evaluation drove
 
@@ -124,7 +160,7 @@ Building the harness surfaced real bugs, now fixed and covered by tests:
 ## Reproduce
 
 ```bash
-python -m sentinel.eval.evaluate              # full suite, v1 and v2, about 10 minutes
+python -m sentinel.eval.evaluate              # full suite, v1, v2 and v3, about 15 minutes
 python -m sentinel.eval.evaluate --quick      # one scenario
 python -m sentinel.eval.evaluate --resume     # continue after an interruption
 ```

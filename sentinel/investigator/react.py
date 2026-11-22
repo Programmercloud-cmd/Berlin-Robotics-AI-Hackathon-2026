@@ -4,8 +4,12 @@ Receives an alert, then loops Thought -> Action (tool) -> Observation, every ste
 and stored as numbered evidence (E1, E2, ...). The policy is deterministic and explainable:
 
   data_check   is the data complete? (an incomplete source ends the case as a data issue)
-  decompose    walk formula edges upstream while one input carries the change -> first cause;
-               everything above it is a downstream symptom
+  traverse     (v3) pruned BFS over the metric graph, upstream from the alerting metric: every visited
+               node is decomposed into its formula inputs and screened against its causal parents;
+               neighbours inside their noise band (|z| < 3) are pruned with their whole branch, only
+               anomalous neighbours carrying part of the change are expanded. The first-cause chain is read
+               deterministically off the decompositions; other anomalous branches are secondary candidates.
+               (v2: greedy walk along the single largest input, feature flag bfs=False)
   localise     drill down dimension by dimension while the change concentrates (lift)
   control      Welch t-test: is the change specific to the segment, siblings normal?
   events       releases / campaigns near the onset whose scope and service fit -> hypotheses;
@@ -15,6 +19,11 @@ and stored as numbered evidence (E1, E2, ...). The policy is deterministic and e
   dead end     no hypothesis reaches 0.8 or its scope cannot be verified -> ask the Meta-Agent to
                extend the graph, then re-test with the new dimensions / metrics
   conclude     supported_cause / hypothesis / explained / data_issue / unexplained, impact in EUR
+
+Evidence anchoring (v3): every tool call writes a structured evidence record (tool, parameters, window,
+entity, signal type, statistics, verdict); every prediction a hypothesis makes is judged against cited
+record ids and contributes a log-likelihood ratio. Normalisation, scoring and ranking are deterministic
+code; the report cites record ids instead of narrating.
 """
 from __future__ import annotations
 
@@ -24,7 +33,7 @@ import numpy as np
 import pandas as pd
 
 from sentinel.bus import EventBus
-from sentinel.contracts import Evidence, Hypothesis, seg_key
+from sentinel.contracts import Evidence, EvidenceLink, Hypothesis, seg_key
 
 from .tools import Toolbox
 
@@ -41,6 +50,52 @@ def fmt_seg(seg: dict) -> str:
 
 
 UNCONFIRMED_Z = 3.0      # an input must move this much for a formula output's change to count
+Z_PRUNE = 3.0            # BFS: a neighbour inside its own noise band (|z| < 3) is pruned with its whole branch
+SHARE_EXPAND = 0.2       # BFS: an anomalous formula input is expanded only if it carries >= 20% of the change
+MAX_WALK_NODES = 12      # BFS budget (nodes decomposed per investigation)
+
+STEP_OF = {"data_check": "data_check", "decompose": "decompose", "localise": "localise", "control": "localise",
+           "events": "events", "causal": "predict", "predict": "predict", "meta": "frontier",
+           "traverse": "traverse", "prune": "traverse"}
+SIGNAL_OF = {"data_check": "data_quality", "decompose": "decomposition", "localise": "drilldown",
+             "control": "control_test", "events": "event_match", "causal": "causal_test", "predict": "process_mix",
+             "meta": "meta", "traverse": "prune", "prune": "prune"}
+_STAT_KEYS = ("z", "p", "t", "rel", "share", "lift", "dev_share", "vol_share", "focus_rel", "siblings_rel", "focus_z",
+              "granger_p", "output_rel", "residual_share", "risk", "explanatory_power")
+
+
+def _jsonable(x):
+    """Numbers, strings, lists and dicts only (evidence records are persisted as JSON)."""
+    if isinstance(x, dict):
+        return {str(k): _jsonable(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple, set)):
+        return [_jsonable(v) for v in x]
+    if isinstance(x, (bool, np.bool_)):
+        return bool(x)
+    if isinstance(x, (int, np.integer)):
+        return int(x)
+    if isinstance(x, (float, np.floating)):
+        return None if not np.isfinite(x) else round(float(x), 6)
+    if x is None or isinstance(x, str):
+        return x
+    return str(x)
+
+
+def _stats_of(result) -> dict:
+    """The test statistics of a tool result, extracted deterministically (top-level, top member, top part)."""
+    out = {}
+    if isinstance(result, dict):
+        for k in _STAT_KEYS:
+            if isinstance(result.get(k), (int, float, np.floating)) and not isinstance(result.get(k), bool):
+                out[k] = result[k]
+        if isinstance(result.get("top"), dict):
+            out.update({f"top_{k}": v for k, v in result["top"].items() if k in _STAT_KEYS})
+            out["top_member"] = result["top"].get("member")
+        if result.get("parts"):
+            p0 = result["parts"][0]
+            out.update({"top_input": p0["input"], "top_share": p0["share"], "top_z": p0["z"]})
+    return out
+
 
 class Case:
     """Working memory of one investigation."""
@@ -66,27 +121,46 @@ class Investigator:
         self.max_steps = max_steps
         self._ev_counter = 0
 
-    # ================================================================ ReAct plumbing
-    def step(self, case: Case, stage: str, thought: str, action: str, fn, interpret) -> object:
+    # ================================================================ ReAct plumbing + evidence anchoring
+    def record(self, case: Case, stage: str, tool: str, query: str, text: str, numbers: dict, *,
+               signal: str = "", params: dict | None = None, entity: str | None = None, focus: str | None = None,
+               stats: dict | None = None, verdict: str = "", window=None, derived: bool = True) -> Evidence:
+        """Write one structured evidence record (deterministic; no free narration) and publish it."""
+        self._ev_counter += 1
+        w = window or (case.start, case.end)
+        ev = Evidence(id=f"E{self._ev_counter}", incident_id=case.inc.id,
+                      step=STEP_OF.get(stage, "frontier"), query=query, result=_jsonable(numbers),
+                      interpretation=text, tool=tool, params=_jsonable(params or {}),
+                      window=[str(pd.Timestamp(w[0])), str(pd.Timestamp(w[1]))],
+                      entity=entity or f"{focus or case.focus}[{fmt_seg(case.seg)}]",
+                      signal=signal or SIGNAL_OF.get(stage, stage), stats=_jsonable(stats or {}), verdict=verdict)
+        case.evidence.append(ev)
+        case.inc.evidence_ids.append(ev.id)
+        self.bus.publish("OBSERVATION", "investigator", {
+            "stage": stage, "evidence_id": ev.id, "text": text, "numbers": ev.result, "focus": focus or case.focus,
+            "segment": fmt_seg(case.seg), "tool": tool, "query": query, "params": ev.params, "window": ev.window, "entity": ev.entity,
+            "signal": ev.signal, "stats": ev.stats, "verdict": verdict,
+            "derived": derived}, case.inc.id)      # derived: written from earlier results, no tool call of its own
+        return ev
+
+    def step(self, case: Case, stage: str, thought: str, action: str, fn, interpret, *, signal: str = "",
+             params: dict | None = None, focus: str | None = None, verdict=None, window=None) -> object:
         inc_id = case.inc.id
-        self.bus.publish("THOUGHT", "investigator", {"stage": stage, "text": thought, "focus": case.focus,
+        f = focus or case.focus
+        self.bus.publish("THOUGHT", "investigator", {"stage": stage, "text": thought, "focus": f,
                                                      "segment": fmt_seg(case.seg)}, inc_id)
-        self.bus.publish("ACTION", "investigator", {"stage": stage, "tool": action, "focus": case.focus,
+        self.bus.publish("ACTION", "investigator", {"stage": stage, "tool": action, "focus": f,
                                                     "segment": fmt_seg(case.seg)}, inc_id)
         result = fn()
         text, numbers = interpret(result)
-        self._ev_counter += 1
-        ev = Evidence(id=f"E{self._ev_counter}", incident_id=inc_id,
-                      step={"data_check": "data_check", "decompose": "decompose", "localise": "localise",
-                            "control": "localise", "events": "events", "causal": "predict", "predict": "predict",
-                            "meta": "frontier"}.get(stage, "frontier"),
-                      query=action, result=numbers, interpretation=text)
-        case.evidence.append(ev)
-        case.inc.evidence_ids.append(ev.id)
-        self.bus.publish("OBSERVATION", "investigator", {"stage": stage, "evidence_id": ev.id, "text": text,
-                                                         "numbers": numbers, "focus": case.focus,
-                                                         "segment": fmt_seg(case.seg)}, inc_id)
+        self.record(case, stage, action.split("(")[0], action, text, numbers, signal=signal,
+                    params={"segment": dict(case.seg), **(params or {})}, focus=f, stats=_stats_of(result),
+                    verdict=verdict(result) if callable(verdict) else (verdict or ""), window=window, derived=False)
         return result
+
+    @staticmethod
+    def last_ev(case: Case) -> list[str]:
+        return [case.evidence[-1].id] if case.evidence else []
 
     def add_hyp(self, case: Case, statement: str, source: str, prior: float, meta: dict) -> Hypothesis:
         h = Hypothesis(id=f"H{len(case.hyps) + 1}", statement=statement, source=source, predictions=[],
@@ -97,15 +171,19 @@ class Investigator:
                                                         "prior": prior, "status": "open"}, case.inc.id)
         return h
 
-    def judge(self, case: Case, h: Hypothesis, prediction: str, ok: bool | None, why: str):
-        h.predictions.append(f"{prediction} -> {'confirmed' if ok else 'refuted' if ok is False else 'untestable'}: {why}")
-        if ok is True:
-            h.posterior = round(odds_update(h.posterior, LR_CONFIRM), 3)
-        elif ok is False:
-            h.posterior = round(odds_update(h.posterior, LR_REFUTE), 3)
+    def judge(self, case: Case, h: Hypothesis, prediction: str, ok: bool | None, why: str, ev: list[str]):
+        """Test one prediction of a hypothesis against the evidence records `ev` (their ids are cited)."""
+        res = "confirmed" if ok else "refuted" if ok is False else "untestable"
+        cite = f" [{', '.join(ev)}]" if ev else ""
+        h.predictions.append(f"{prediction} -> {res}: {why}{cite}")
+        lr = LR_CONFIRM if ok is True else LR_REFUTE if ok is False else 1.0
+        if ok is not None:
+            h.posterior = round(odds_update(h.posterior, lr), 3)
+        h.evidence.append(EvidenceLink(prediction=prediction, result=res, evidence_ids=list(ev),
+                                       log_lr=round(float(np.log(lr)), 3)))
         self.bus.publish("HYPOTHESIS", "investigator", {"id": h.id, "statement": h.statement, "prediction": prediction,
-                                                        "result": "confirmed" if ok else "refuted" if ok is False else "untestable",
-                                                        "why": why, "posterior": h.posterior}, case.inc.id)
+                                                        "result": res, "why": why, "evidence_ids": list(ev),
+                                                        "posterior": h.posterior}, case.inc.id)
 
     # ================================================================ the investigation
     def investigate(self, inc, anomaly: dict, now) -> Case:
@@ -150,29 +228,10 @@ class Investigator:
         onset = self.tools.onset(case.entry, case.seg, a_ts)
         case.start = onset
         case.notes["onset"] = str(onset)
-        depth = 0
-        while depth < 6:
-            depth += 1
-            dec = self.step(case, "decompose",
-                            f"Which formula input of {case.focus} explains its change in [{fmt_seg(case.seg)}]?",
-                            f"decompose({case.focus}, {fmt_seg(case.seg)}, {onset}..{now})",
-                            lambda: self.tools.decompose(case.focus, case.seg, onset, now),
-                            lambda r: self._decomp_text(case.focus, r))
-            if not dec.get("possible"):
-                break
-            if depth == 1 and dec["parts"] and max(abs(x["z"]) for x in dec["parts"]) < UNCONFIRMED_Z:
-                # a formula output can look extreme when it is a small difference of large sums (contribution);
-                # if no input moved outside its own noise, the "change" is amplified noise, not a problem
-                case.notes["unconfirmed"] = True
-                self.bus.publish("THOUGHT", "investigator", {"stage": "decompose", "text":
-                    f"No input of {case.focus} moved outside its own noise (all |z| < {UNCONFIRMED_Z}): the output's "
-                    "deviation is amplified noise of a difference. Watch it; do not page."}, inc.id)
-            top = dec["parts"][0]
-            if top["share"] >= 0.5 and abs(top["z"]) >= 3:
-                case.focus = top["input"]
-                case.chain.append(top["input"])
-                continue
-            break
+        if self.bfs:
+            self.traverse(case, onset, now)
+        else:
+            self._greedy_decompose(case, onset, now)
         case.inc.first_cause = case.focus
         self.bus.publish("THOUGHT", "investigator", {"stage": "decompose", "text":
             f"First cause candidate: {case.focus}. Downstream symptoms: {' <- '.join(reversed(case.chain[:-1])) or 'none'}."},
@@ -187,7 +246,9 @@ class Investigator:
             r = self.step(case, "control", f"Is the change specific to {key}={case.seg[key]}, with the other {key} values normal?",
                           f"compare_control({case.focus}, {fmt_seg(case.seg)}, vs other {key})",
                           lambda key=key: self.tools.compare_control(case.focus, case.seg, key, onset, now),
-                          lambda r, key=key: self._control_text(case, key, r))
+                          lambda r, key=key: self._control_text(case, key, r), params={"key": key},
+                          verdict=lambda r: ("confined" if r.get("confined") else "not_confined")
+                          if r.get("possible") else "untestable")
             if r.get("possible") and not r["confined"]:
                 case.seg.pop(key)
                 self.bus.publish("THOUGHT", "investigator", {"stage": "control", "text":
@@ -232,6 +293,131 @@ class Investigator:
         return self.conclude(case)
 
     # ================================================================ stages
+    @property
+    def bfs(self) -> bool:
+        return bool(getattr(self.mon, "features", {}).get("bfs", True))
+
+    def _flag_unconfirmed(self, case: Case, metric: str, dec: dict):
+        # a formula output can look extreme when it is a small difference of large sums (contribution);
+        # if no input moved outside its own noise, the "change" is amplified noise, not a problem
+        if dec["parts"] and max(abs(x["z"]) for x in dec["parts"]) < UNCONFIRMED_Z:
+            case.notes["unconfirmed"] = True
+            self.bus.publish("THOUGHT", "investigator", {"stage": "decompose", "text":
+                f"No input of {metric} moved outside its own noise (all |z| < {UNCONFIRMED_Z}): the output's "
+                "deviation is amplified noise of a difference. Watch it; do not page."}, case.inc.id)
+
+    def _decompose(self, case: Case, metric: str, onset, now, thought: str) -> dict:
+        return self.step(case, "decompose", thought, f"decompose({metric}, {fmt_seg(case.seg)}, {onset}..{now})",
+                         lambda: self.tools.decompose(metric, case.seg, onset, now),
+                         lambda r: self._decomp_text(metric, r), focus=metric, params={"metric": metric},
+                         verdict=lambda r: "decomposed" if r.get("possible") else "leaf")
+
+    def _greedy_decompose(self, case: Case, onset, now):
+        """v2 policy: follow the single largest formula input while it carries the change."""
+        for depth in range(6):
+            dec = self._decompose(case, case.focus, onset, now,
+                                  f"Which formula input of {case.focus} explains its change in [{fmt_seg(case.seg)}]?")
+            if not dec.get("possible"):
+                break
+            if depth == 0:
+                self._flag_unconfirmed(case, case.focus, dec)
+            top = dec["parts"][0]
+            if top["share"] >= 0.5 and abs(top["z"]) >= 3:
+                case.focus = top["input"]
+                case.chain.append(top["input"])
+                continue
+            break
+
+    def traverse(self, case: Case, onset, now):
+        """v3 policy: pruned breadth-first search over the metric graph, upstream from the alerting metric.
+
+        Every visited node is decomposed into its formula inputs and screened against its causal parents.
+        Neighbours inside their own noise band (|z| < Z_PRUNE) are pruned together with their whole branch
+        and recorded as evidence; only anomalous neighbours that carry part of the change are expanded.
+        The first-cause chain is then read deterministically off the collected decompositions (largest
+        input carrying >= 50% of the change, |z| >= 3), and every other anomalous branch is kept as a
+        secondary candidate (compound incidents). No step is chosen by a language model."""
+        from collections import deque
+        walk = {"visited": [], "anomalous": [case.entry], "pruned": [], "edges": [], "secondary": []}
+        decomp: dict[str, dict] = {}
+        seen, q = {case.entry}, deque([(case.entry, 0)])
+        while q and len(walk["visited"]) < MAX_WALK_NODES:
+            node, depth = q.popleft()
+            walk["visited"].append(node)
+            dec = self._decompose(case, node, onset, now,
+                                  f"BFS depth {depth}: which formula inputs of {node} moved in [{fmt_seg(case.seg)}]?")
+            if dec.get("possible"):
+                decomp[node] = dec
+                if node == case.entry:
+                    self._flag_unconfirmed(case, node, dec)
+                normal = []
+                for p in dec["parts"]:
+                    if abs(p["z"]) < Z_PRUNE:
+                        normal.append((p["input"], p["z"], "formula"))
+                    elif abs(p["share"]) >= SHARE_EXPAND and p["input"] not in seen and depth + 1 < 6:
+                        seen.add(p["input"])
+                        q.append((p["input"], depth + 1))
+                        walk["anomalous"].append(p["input"])
+                        walk["edges"].append([p["input"], node, "formula"])
+                self._prune_record(case, node, normal, walk)
+            # causal parents: screen cheaply, expand only the anomalous ones
+            parents = [e for e in self.g.causes(node) if e.src not in seen]
+            if parents:
+                screened, normal = [], []
+                for e in parents:
+                    cseg = {k: v for k, v in case.seg.items() if k in self.g.nodes[e.src].dimensions}
+                    w = self.tools.window_dev(e.src, cseg, onset, now)
+                    screened.append((e.src, w.get("z", 0.0), w.get("rel", np.nan)))
+                    if abs(w.get("z", 0.0)) < Z_PRUNE:
+                        normal.append((e.src, w.get("z", 0.0), "causal"))
+                    elif depth + 1 < 6:
+                        seen.add(e.src)
+                        q.append((e.src, depth + 1))
+                        walk["anomalous"].append(e.src)
+                        walk["edges"].append([e.src, node, "causal"])
+                self.record(case, "traverse", "screen_causal_parents",
+                            f"window_dev([{', '.join(s for s, _, _ in screened)}], {fmt_seg(case.seg)}, {onset}..{now})",
+                            f"causal parents of {node}: " + "; ".join(
+                                f"{s} {r:+.1%} (z={z:+.1f}) {'anomalous -> expand' if abs(z) >= Z_PRUNE else 'normal -> prune'}"
+                                for s, z, r in screened),
+                            {s: round(float(z), 2) for s, z, _ in screened}, signal="prune", focus=node,
+                            params={"node": node, "parents": [s for s, _, _ in screened]},
+                            stats={"anomalous": sum(abs(z) >= Z_PRUNE for _, z, _ in screened),
+                                   "pruned": len(normal)},
+                            verdict="expanded" if len(normal) < len(screened) else "all_pruned",
+                            window=(onset, now))
+                walk["pruned"] += [s for s, _, _ in normal]
+        # first-cause chain read off the decompositions (deterministic)
+        while True:
+            dec = decomp.get(case.focus)
+            if dec is None and len(case.chain) > 1 and len(case.chain) < 7:
+                dec = self._decompose(case, case.focus, onset, now,       # beyond the BFS budget: finish the chain
+                                      f"Which formula input of {case.focus} explains its change?")
+            if not dec or not dec.get("possible"):
+                break
+            top = dec["parts"][0]
+            if top["share"] >= 0.5 and abs(top["z"]) >= 3 and top["input"] not in case.chain:
+                case.focus = top["input"]
+                case.chain.append(top["input"])
+                continue
+            break
+        walk["secondary"] = [m for m in walk["anomalous"] if m not in case.chain]
+        case.notes["walk"] = walk
+        self.bus.publish("GRAPH_WALK", "investigator", {
+            "entry": case.entry, "segment": fmt_seg(case.seg), "visited": walk["visited"], "pruned": walk["pruned"],
+            "anomalous": walk["anomalous"], "edges": walk["edges"], "chain": case.chain,
+            "secondary": walk["secondary"]}, case.inc.id)
+
+    def _prune_record(self, case: Case, node: str, normal: list, walk: dict):
+        if not normal:
+            return
+        walk["pruned"] += [m for m, _, _ in normal]
+        self.record(case, "prune", "prune", f"prune(inputs of {node}, |z| < {Z_PRUNE})",
+                    f"pruned {len(normal)} normal input(s) of {node}: " +
+                    ", ".join(f"{m} (z={z:+.1f})" for m, z, _ in normal) + "; their branches are not explored",
+                    {m: round(float(z), 2) for m, z, _ in normal}, signal="prune", focus=node,
+                    params={"node": node, "threshold_z": Z_PRUNE}, stats={"pruned": len(normal)}, verdict="normal")
+
     def localise(self, case: Case, start, end):
         for _ in range(3):
             dims = [d for d in self.g.nodes[case.focus].dimensions if d not in case.seg]
@@ -240,7 +426,10 @@ class Investigator:
                 r = self.step(case, "localise", f"Where is the change of {case.focus} concentrated? Split by {d}.",
                               f"drilldown({case.focus}, {fmt_seg(case.seg)}, by={d})",
                               lambda d=d: self.tools.drilldown(case.focus, case.seg, d, start, end),
-                              lambda r: self._drill_text(r))
+                              lambda r: self._drill_text(r), params={"by": d},
+                              verdict=lambda r: ("concentrated" if r.get("top") and r["top"]["dev_share"] >= 0.6
+                                                 and r["top"]["lift"] >= 1.5 and abs(r["top"]["z"]) >= 3
+                                                 else "spread"))
                 top = r.get("top")
                 if top and top["dev_share"] >= 0.6 and top["lift"] >= 1.5 and abs(top["z"]) >= 3:
                     if best is None or top["lift"] > best[1]["lift"]:
@@ -269,7 +458,10 @@ class Investigator:
                         lambda: self._candidate_events(onset),
                         lambda r: ((f"{len(r)} events: " + "; ".join(f"{e.ts:%H:%M} {e.type} {e.service or ''} "
                                                                        f"'{e.description}' scope={fmt_seg(e.scope)}" for e in r))
-                                   if r else "no events near the onset", {"events": len(r)}))
+                                   if r else "no events near the onset", {"events": len(r)}),
+                        params={"from": str(onset - timedelta(hours=3)), "to": str(onset + timedelta(hours=1))},
+                        verdict=lambda r: f"{len(r)} candidate(s)")
+        ev_events = self.last_ev(case)
         known = {m.get("event_id") for m in case.hyp_meta.values()}
         for e in evs:
             if e.id in known and not rerun:
@@ -291,10 +483,10 @@ class Investigator:
                 dt = (onset - pd.Timestamp(e.ts)).total_seconds() / 3600
                 if e.planned and e.type == "campaign":
                     self.judge(case, h, "onset falls inside the running campaign window", 0 <= dt <= 24,
-                               f"campaign started {e.ts:%m-%d %H:%M}, onset {onset:%m-%d %H:%M}")
+                               f"campaign started {e.ts:%m-%d %H:%M}, onset {onset:%m-%d %H:%M}", ev_events)
                 else:
                     self.judge(case, h, "onset coincides with the event (<= 1h)", abs(dt) <= 1.0,
-                               f"onset {onset:%H:%M}, event {e.ts:%H:%M}")
+                               f"onset {onset:%H:%M}, event {e.ts:%H:%M}", ev_events)
             if h.status == "rejected":
                 continue
             # confinement: scope keys must be verified by localisation
@@ -303,17 +495,25 @@ class Investigator:
                 if any(p.startswith(f"change concentrated in {k}=") for p in h.predictions):
                     continue
                 if k in case.seg and case.seg[k] == v:
-                    ctl = self.tools.compare_control(case.focus, case.seg, k, start, end)
+                    ctl = self.step(case, "control", f"{h.id}: is the change confined to {k}={v}, as the event's scope "
+                                    "predicts?", f"compare_control({case.focus}, {fmt_seg(case.seg)}, vs other {k})",
+                                    lambda k=k: self.tools.compare_control(case.focus, case.seg, k, start, end),
+                                    lambda r, k=k: self._control_text(case, k, r), params={"key": k},
+                                    verdict=lambda r: "confined" if r.get("confined") else "not_confined")
                     self.judge(case, h, f"change concentrated in {k}={v}, other {k} values normal",
                                bool(ctl.get("confined")),
-                               f"{ctl.get('focus_rel', float('nan')):+.1%} vs other {k} {ctl.get('siblings_rel', float('nan')):+.1%}")
+                               f"{ctl.get('focus_rel', float('nan')):+.1%} vs other {k} "
+                               f"{ctl.get('siblings_rel', float('nan')):+.1%}", self.last_ev(case))
                 elif k not in case.seg and k in self.g.nodes[case.focus].dimensions:
-                    dd = self.tools.drilldown(case.focus, case.seg, k, start, end)
+                    dd = self.step(case, "localise", f"{h.id}: does the change concentrate in the event's scope {k}={v}?",
+                                   f"drilldown({case.focus}, {fmt_seg(case.seg)}, by={k})",
+                                   lambda k=k: self.tools.drilldown(case.focus, case.seg, k, start, end),
+                                   lambda r: self._drill_text(r), params={"by": k})
                     me = next((m for m in dd["members"] if m["member"] == v), None)
                     ok = bool(me and me["lift"] >= 1.3 and me["dev_share"] >= 0.4)
                     self.judge(case, h, f"change concentrated in {k}={v} (event scope)", ok,
                                (f"{v} carries {me['dev_share']:.0%} of the change with {me['vol_share']:.0%} of volume"
-                                if me else "member not found"))
+                                if me else "member not found"), self.last_ev(case))
             if e.planned and e.scope and not any(p.startswith("change concentrated in") for p in h.predictions) \
                     and not any(p.startswith("scope of the planned change") for p in h.predictions):
                 # the focus cannot be split by the plan's scope: check it on the metrics that compose the focus
@@ -321,16 +521,23 @@ class Investigator:
                     k in self.g.nodes[v.src].dimensions for k in list(e.scope) + list(case.seg))), None)
                 if proxy:
                     k, v = next(iter(e.scope.items()))
-                    dd = self.tools.drilldown(proxy, case.seg, k, start, end)
+                    dd = self.step(case, "localise", f"{h.id}: {case.focus} cannot be split by {k}; check the planned "
+                                   f"scope on its input {proxy}.", f"drilldown({proxy}, {fmt_seg(case.seg)}, by={k})",
+                                   lambda proxy=proxy, k=k: self.tools.drilldown(proxy, case.seg, k, start, end),
+                                   lambda r: self._drill_text(r), params={"by": k, "metric": proxy}, focus=proxy)
                     me = next((m for m in dd["members"] if m["member"] == v), None)
                     ok = bool(me and me["lift"] >= 1.3 and me["dev_share"] >= 0.4)
                     self.judge(case, h, f"scope of the planned change checked on input {proxy}: concentrated in {k}={v}",
                                ok, (f"{v} carries {me['dev_share']:.0%} of {proxy}'s change with {me['vol_share']:.0%} "
-                                    f"of volume") if me else "member not found")
+                                    f"of volume") if me else "member not found", self.last_ev(case))
                 else:
+                    ev = self.record(case, "events", "graph.dimensions", f"dimensions({case.focus} and its inputs)",
+                                     f"{case.focus} and its formula inputs have no dimension {sorted(e.scope)}",
+                                     {"missing": len(e.scope)}, signal="graph_structure",
+                                     params={"metric": case.focus, "scope": e.scope}, verdict="unverifiable")
                     self.judge(case, h, "scope of the planned change can be checked on this metric", False,
                                f"{case.focus} and its inputs cannot be split by {sorted(e.scope)}: timing alone "
-                               "does not explain it")
+                               "does not explain it", [ev.id] + ev_events)
             if unverifiable and not rerun:
                 if any(k not in self.g.nodes[case.focus].dimensions for k in unverifiable):
                     case.dead_end_reasons.append(
@@ -340,12 +547,24 @@ class Investigator:
                 h.statement += " (planned; expected effect " + ", ".join(f"{k} x{v}" for k, v in e.expected_effect.items()) + ")"
             mech = e.service in linked if e.service else False
             if mech and not any(p.startswith("mechanism") for p in h.predictions):
+                ev = self.record(case, "events", "graph.services", f"services({case.focus} and its causes)",
+                                 f"{e.service} owns a metric on the path to {case.focus} (context edges)",
+                                 {"linked": 1}, signal="graph_structure",
+                                 params={"service": e.service, "metric": case.focus}, verdict="linked")
                 self.judge(case, h, "mechanism: the released service is linked to the first cause in the graph", True,
-                           f"{e.service} -> {case.focus} via context edges")
-        # causal parents of the first cause
+                           f"{e.service} -> {case.focus} via context edges", [ev.id])
+        # causal parents of the first cause; with BFS, parents inside their noise band are pruned before any
+        # hypothesis is formed (hypotheses only on anomalous branches)
+        pruned = []
         for edge in self.g.causes(case.focus):
             if any(case.hyp_meta[h.id].get("cause") == edge.src for h in case.hyps):
                 continue
+            if self.bfs:
+                cseg = {k: v for k, v in case.seg.items() if k in self.g.nodes[edge.src].dimensions}
+                z = self.tools.window_dev(edge.src, cseg, start, end).get("z", 0.0)
+                if abs(z) < Z_PRUNE:
+                    pruned.append((edge.src, z, "causal"))
+                    continue
             r = self.step(case, "causal", f"Causal parent {edge.src} ({edge.sign}, conf {edge.confidence:.2f}): did it move first?",
                           f"causal_check({edge.src} -> {case.focus}, {fmt_seg(case.seg)})",
                           lambda edge=edge: self.tools.causal_check(edge.src, case.focus, edge.sign, case.seg, start, end,
@@ -353,15 +572,21 @@ class Investigator:
                           lambda r: (f"{r['cause']} [{r['segment'] or 'total'}] {r['rel']:+.1%} (z={r['z']:+.1f}); "
                                      f"{'consistent with' if r['consistent'] else 'does not explain'} the change"
                                      + (f"; Granger p={r['granger_p']:.2g}" if 'granger_p' in r else ""),
-                                     {k: r[k] for k in ("rel", "z") if k in r}))
+                                     {k: r[k] for k in ("rel", "z") if k in r}),
+                          params={"cause": edge.src, "effect": case.focus, "sign": edge.sign},
+                          verdict=lambda r: "consistent" if r["consistent"] else "inconsistent")
+            ev_c = self.last_ev(case)
             h = self.add_hyp(case, f"{edge.src} moved and drove {case.focus} ({edge.sign})", "causal_edge",
-                             min(0.5, edge.confidence * 0.6), {"cause": edge.src})
+                             min(0.5, edge.confidence * 0.6), {"cause": edge.src, "ev": ev_c})
             self.judge(case, h, f"{edge.src} moved in the same segment with the expected sign", r["consistent"],
-                       f"{r['rel']:+.1%}, z={r['z']:+.1f}")
+                       f"{r['rel']:+.1%}, z={r['z']:+.1f}", ev_c)
             if r.get("granger_p") is not None and r["consistent"]:
-                self.judge(case, h, "Granger precedence", r["granger_p"] < 0.01, f"p={r['granger_p']:.2g}")
+                self.judge(case, h, "Granger precedence", r["granger_p"] < 0.01, f"p={r['granger_p']:.2g}", ev_c)
             if not r["consistent"]:
                 h.status = "rejected"
+        if pruned:
+            self._prune_record(case, f"{case.focus} (causal parents)", pruned, case.notes.setdefault(
+                "walk", {"visited": [], "anomalous": [], "pruned": [], "edges": [], "secondary": []}))
         # mechanism chain: an event whose service owns a cause that did move -> event -> cause -> first cause
         moved = [case.hyp_meta[h.id]["cause"] for h in case.hyps
                  if case.hyp_meta[h.id].get("cause") and h.status != "rejected" and h.posterior >= 0.5]
@@ -371,8 +596,10 @@ class Investigator:
                 continue
             for c in moved:
                 if e.service in self.g.services(c) and not any(p.startswith("mechanism chain") for p in h.predictions):
+                    cause_h = next(x for x in case.hyps if case.hyp_meta[x.id].get("cause") == c)
                     self.judge(case, h, f"mechanism chain {e.service} -> {c} -> {case.focus}", True,
-                               f"{c} belongs to {e.service} and moved with the expected sign at the onset")
+                               f"{c} belongs to {e.service} and moved with the expected sign at the onset",
+                               case.hyp_meta[cause_h.id].get("ev", []))
 
     def mechanism(self, case: Case, start, end):
         """Which concrete events changed inside the segment? (e.g. payment_timed_out share 2% -> 63%).
@@ -386,7 +613,8 @@ class Investigator:
                         f"activity_mix({outcomes}, {fmt_seg(case.seg)}, now vs same hours on 7 previous days)",
                         lambda: self.data.activity_mix(start, end, case.seg, outcomes),
                         lambda r: ("; ".join(f"{x['activity']} {x['now']} vs {x['baseline']:.0f} usual" for x in r),
-                                   {x["activity"]: x["now"] for x in r}))
+                                   {x["activity"]: x["now"] for x in r}), signal="process_mix")
+        ev_mix = self.last_ev(case)
         tn, tb = sum(x["now"] for x in mix), sum(x["baseline"] for x in mix)
         if tn < 20 or tb <= 0:
             return
@@ -412,25 +640,37 @@ class Investigator:
                                + (f" ({detail})" if detail else ""), "event", 0.4,
                          {"mechanism": top["activity"], "samples": samples})
         self.judge(case, h, f"{top['activity']} share changed inside the segment", True,
-                   f"{share_base:.1%} -> {share_now:.1%} ({top['now']} events)")
+                   f"{share_base:.1%} -> {share_now:.1%} ({top['now']} events)", ev_mix + self.last_ev(case))
         # outside the segment the mix must be normal, else it is not specific to this segment
         if case.seg:
-            allm = self.data.activity_mix(start, end, {}, outcomes)
+            allm = self.step(case, "predict", f"Is the {top['activity']} share normal outside {fmt_seg(case.seg)}?",
+                             f"activity_mix({outcomes}, total, now vs same hours on 7 previous days)",
+                             lambda: self.data.activity_mix(start, end, {}, outcomes),
+                             lambda r: ("; ".join(f"{x['activity']} {x['now']} vs {x['baseline']:.0f} usual" for x in r),
+                                        {x["activity"]: x["now"] for x in r}), signal="process_mix")
             on = sum(x["now"] for x in allm) - tn
             ob = sum(x["baseline"] for x in allm) - tb
             a_all = next(x for x in allm if x["activity"] == top["activity"])
             if on > 20 and ob > 0:
                 out_now, out_base = (a_all["now"] - top["now"]) / on, (a_all["baseline"] - top["baseline"]) / ob
                 self.judge(case, h, f"{top['activity']} share normal outside {fmt_seg(case.seg)}",
-                           abs(out_now - out_base) < abs(delta) / 3, f"{out_base:.1%} -> {out_now:.1%} elsewhere")
+                           abs(out_now - out_base) < abs(delta) / 3, f"{out_base:.1%} -> {out_now:.1%} elsewhere",
+                           self.last_ev(case))
 
     # ================================================================ conclusion
     def conclude(self, case: Case, label: str | None = None) -> Case:
         inc = case.inc
+        by_id = {e.id: e for e in case.evidence}
         for h in case.hyps:
             if h.status != "rejected":
                 h.status = "supported" if h.posterior >= 0.8 else "open"
-        best = max((h for h in case.hyps if h.status != "rejected"), key=lambda h: h.posterior, default=None)
+            # deterministic hybrid score: the posterior, weighted by how many independent kinds of evidence
+            # confirmed the hypothesis (timing alone < timing + scope + mechanism)
+            kinds = {by_id[i].signal for link in h.evidence if link.result == "confirmed"
+                     for i in link.evidence_ids if i in by_id}
+            h.score = round(h.posterior * (0.85 + 0.05 * min(3, len(kinds))), 4) if h.status != "rejected" else 0.0
+        # ranking: posterior first (the labels' thresholds), the hybrid score breaks ties
+        best = max((h for h in case.hyps if h.status != "rejected"), key=lambda h: (h.posterior, h.score), default=None)
         if label is None:
             ev = case.hyp_meta.get(best.id, {}).get("event") if best else None
             if best and ev is not None and ev.planned and best.posterior >= 0.5:

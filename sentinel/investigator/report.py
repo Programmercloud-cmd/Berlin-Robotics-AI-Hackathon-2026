@@ -1,4 +1,8 @@
-"""Final root-cause report (markdown), built only from the investigation's evidence."""
+"""Final root-cause report (markdown), built only from the investigation's evidence records.
+
+Every conclusion cites evidence ids (E12): each id is a structured record (tool, parameters, window, entity,
+signal type, statistics, verdict) written by deterministic code right after the tool call, so any sentence
+in the report can be audited back to the query that produced it."""
 from __future__ import annotations
 
 from sentinel.contracts import seg_key
@@ -23,22 +27,37 @@ def render_report(g, case, best, impact: dict) -> str:
         sym = " → ".join(g.nodes[m].name for m in reversed(case.chain[:-1]))
         lines.append(f"**Symptoms downstream:** {sym} (explained by the first cause through the formula graph).")
     if best is not None:
-        lines.append(f"**Leading explanation ({best.posterior:.0%}):** {best.statement}.")
+        cites = sorted({i for link in best.evidence if link.result == "confirmed" for i in link.evidence_ids},
+                       key=lambda x: int(x[1:]) if x[1:].isdigit() else 0)
+        lines.append(f"**Leading explanation ({best.posterior:.0%}):** {best.statement}."
+                     + (f" Supported by {', '.join(cites)}." if cites else ""))
     if impact.get("hours"):
         lab = impact.get("money_label", "contribution")
         lines.append(f"**Business impact:** {impact['orders_delta']:+,.0f} orders, GMV {impact['gmv_delta_eur']:+,.0f} EUR, "
                      f"{lab} {impact['contribution_eur_total']:+,.0f} EUR over {impact['hours']} h "
                      f"({impact['contribution_eur_per_h']:+,.0f} EUR/h; {lab} is {impact['margin']:.1%} of GMV).")
+    walk = case.notes.get("walk") or {}
+    if walk.get("visited"):
+        lines += ["", "### Graph walk (pruned BFS)"]
+        lines.append(f"- visited {len(walk['visited'])} node(s): {', '.join(walk['visited'])}")
+        if walk.get("pruned"):
+            lines.append(f"- pruned as normal (|z| < 3, branch not explored): {', '.join(dict.fromkeys(walk['pruned']))}")
+        lines.append(f"- first-cause chain: {' <- '.join(case.chain)}")
+        if walk.get("secondary"):
+            lines.append(f"- other anomalous branches (secondary candidates): {', '.join(walk['secondary'])}")
     lines += ["", "### Evidence"]
     for e in case.evidence:
-        lines.append(f"- **{e.id}** [{e.step}] {e.interpretation}")
+        tag = f"{e.step}" + (f"/{e.signal}" if e.signal and e.signal != e.step else "")
+        verdict = f" -> {e.verdict}" if e.verdict else ""
+        lines.append(f"- **{e.id}** [{tag}] {e.interpretation}{verdict}")
     tested = [h for h in case.hyps]
     if tested:
         lines += ["", "### Hypotheses tested"]
         for h in tested:
-            lines.append(f"- **{h.id}** ({h.source}, prior {h.prior:.2f} → {h.posterior:.2f}, {h.status}): {h.statement}")
-            for p in h.predictions:
-                lines.append(f"  - {p}")
+            lines.append(f"- **{h.id}** ({h.source}, prior {h.prior:.2f} → {h.posterior:.2f}, score {h.score:.2f}, "
+                         f"{h.status}): {h.statement}")
+            for p, link in zip(h.predictions, h.evidence or [None] * len(h.predictions)):
+                lines.append(f"  - {p}" + (f" (log-LR {link.log_lr:+.2f})" if link is not None else ""))
     lines += ["", "### What remains uncertain"]
     mech = case.hyp_meta.get(best.id, {}).get("mechanism") if best is not None else None
     if mech:
