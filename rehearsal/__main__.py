@@ -3,7 +3,9 @@
 import json
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from math import comb, fsum, sqrt
 from pathlib import Path
+from statistics import pstdev
 from urllib.parse import urlencode, urlsplit
 
 HERE = Path(__file__).resolve().parent
@@ -15,6 +17,7 @@ REPLAY_FILE = HERE.parent / ".runtime" / "feature-replay.json"
 FILES = {
     "/": ("index.html", "text/html"),
     "/app.js": ("app.js", "text/javascript"),
+    "/methods.js": ("methods.js", "text/javascript"),
     "/style.css": ("style.css", "text/css"),
     "/stripe-timeout.json": ("stripe-timeout.json", "application/json"),
 }
@@ -22,6 +25,28 @@ FILES = {
 
 def evidence_id(row):
     return f"E{row['id']}"
+
+
+def detection_details(alert_context):
+    alert = alert_context["alert"]
+    reference = alert["detection_reference"]
+    history = [
+        {"start": row["window_start"], "value": row["value"],
+         "numerator": row["details"]["numerator"], "denominator": row["details"]["denominator"]}
+        for row in alert_context["historical_readings"]
+    ]
+    observed, attempts = reference["numerator"], reference["denominator"]
+    smoothed = (reference["baseline_numerator"] + .5) / (reference["baseline_denominator"] + 1)
+    tail = fsum(comb(attempts, count) * smoothed ** count * (1 - smoothed) ** (attempts - count)
+                 for count in range(observed + 1))
+    return {
+        "history": history,
+        "coverage": alert_context["coverage"],
+        "population_sd": pstdev(row["value"] for row in history),
+        "sampling_noise": sqrt(alert["expected"] * (1 - alert["expected"]) / attempts),
+        "smoothed_probability": smoothed,
+        "lower_tail": tail,
+    }
 
 
 def replay_summary(replay):
@@ -43,8 +68,12 @@ def replay_summary(replay):
     sample = next(event for event in reversed(sample_read["payload"]["result"])
                   if event["activity"] == "payment_timed_out")
     workflow = next(row for row in reads if row["payload"]["tool"] == "graph_neighbors")
+    workflow_edge = next(edge for edge in workflow["payload"]["result"]["edges"]
+                         if edge["source"] == "activity:payment_attempted"
+                         and edge["target"] == "activity:payment_timed_out" and edge["kind"] == "precedes")
     recovery = [
-        {"window_start": row["window_start"], "value": row["payload"]["value"], "expected": row["payload"]["expected"]}
+        {"id": evidence_id(row), "window_start": row["window_start"], "value": row["payload"]["value"],
+         "expected": row["payload"]["expected"], "sample_size": row["payload"]["sample_size"]}
         for row in rows if row["kind"] == "recovery observation"
     ][-incident["healthy_windows"]:]
     conclusion = next(row for row in rows if row["kind"] == "investigation conclusion")
@@ -63,22 +92,36 @@ def replay_summary(replay):
         "lab_preview": PREVIEW_LAB + "/#chat-title",
         "readings_url": f"{REPLAY_EYE}/api/catalog/{incident['metric_id']}/readings?{query}",
         "alert": trigger,
+        "detection": detection_details(alert_context),
+        "grouping": [
+            {"id": evidence_id(row), **row["payload"]["grouping_evidence"]}
+            for row in replay["at_detection"]["evidence"] if row["kind"] == "related anomaly"
+            and isinstance(row["payload"].get("grouping_evidence"), dict)
+        ],
         "metric": alert_context["metric_definition"],
         "alert_evidence": evidence_id(contexts["alert"]),
         "graph_evidence": evidence_id(contexts["graph_neighbors"]),
         "workflow_evidence": evidence_id(workflow),
+        "workflow_edge": workflow_edge,
         "graph_links": [{**edge, "label": labels.get(edge["target"], edge["target"])} for edge in graph["edges"]],
         "sample": {**sample, "evidence_id": evidence_id(sample_read)},
         "timeouts": {**timeouts, "evidence_id": evidence_id(scoped_mix)},
         "recovery": recovery,
         "reads": [{
             "id": evidence_id(row), "tool": row["payload"]["tool"], "title": row["payload"]["title"],
+            "params": row["payload"]["params"], "reason": row["payload"]["interpretation"],
+            "result": row["payload"]["result"],
             "cited": evidence_id(row) in cited,
             "available": bool(row["payload"].get("result"))
             and not (isinstance(row["payload"]["result"], dict)
                      and (row["payload"]["result"].get("available") is False or "error" in row["payload"]["result"])),
         } for row in reads],
         "conclusion_evidence": evidence_id(conclusion),
+        "continuations": report["continuations"],
+        "session_count": len(report["reasoning_sessions"]),
+        "citations": report["evidence_ids"],
+        "alternative": report["alternative"],
+        "stop_reason": report["stop_reason"],
         "report_url": f"{REPLAY_EYE}/api/incidents/{incident['id']}/original-report",
     }
 

@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#121110">
   <title>Eye of the System · Devin investigation replay</title>
   <link rel="stylesheet" href="/style.css">
-  <script src="/app.js" defer></script>
+  <script src="/app.js" type="module"></script>
 </head>
 <body>
   <header class="bar">
@@ -49,6 +49,10 @@
       </div>
       <div id="facts" class="facts" hidden></div>
     </article>
+    <details id="technical" class="technical" hidden>
+      <summary><span>Technical pipeline</span><span id="technical-count"></span></summary>
+      <div id="technical-body" class="technical-body"></div>
+    </details>
     <nav class="controls" aria-label="Walkthrough steps">
       <a id="previous" hidden>← Previous</a>
       <a id="next" hidden>Next →</a>

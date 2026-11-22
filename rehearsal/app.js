@@ -1,3 +1,5 @@
+import { renderMethods } from "./methods.js";
+
 const byId = (id) => document.getElementById(id);
 const clock = new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", hour: "2-digit", minute: "2-digit" });
 const percent = new Intl.NumberFormat("en", {
@@ -184,7 +186,8 @@ let activeIndex = -1;
 let transition;
 
 function render(focus = false) {
-  const selected = steps.findIndex((step) => "#" + step.id === location.hash);
+  const [stage, substep] = location.hash.slice(1).split("/", 2);
+  const selected = steps.findIndex((step) => step.id === stage);
   const index = Math.max(selected, 0);
   const step = steps[index];
   const changed = index !== activeIndex;
@@ -209,7 +212,8 @@ function render(focus = false) {
     facts.replaceChildren(...step.facts(snapshot));
     byId("links").replaceChildren(...step.links(snapshot).map(link));
   }
-  if (changed && focus) {
+  renderMethods(byId("technical"), step.id, substep, snapshot, focus);
+  if (changed && focus && !substep) {
     title.focus({ preventScroll: true });
     transition?.cancel();
     if (!reducedMotion.matches) {

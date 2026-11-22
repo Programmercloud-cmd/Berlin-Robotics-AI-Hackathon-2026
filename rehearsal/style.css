@@ -136,6 +136,43 @@ h2:focus { outline: none; }
 .trace code { color: var(--incident); font: .7rem var(--mono); }
 .trace small { margin-left: auto; color: var(--muted); }
 
+.technical { margin-top: .9rem; border: 1px solid #4d4139; border-radius: .88rem; background: #191614; box-shadow: 0 16px 34px #0002; }
+.technical > summary { display: flex; align-items: center; gap: .8rem; list-style: none; cursor: pointer; padding: .92rem 1.15rem; color: #ffccb0; font-size: .88rem; font-weight: 680; }
+.technical > summary::-webkit-details-marker { display: none; }
+.technical > summary::before { content: ""; width: .44rem; height: .44rem; display: inline-block; border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; transform: rotate(-45deg); transition: transform .24s var(--ease); }
+.technical[open] > summary::before { transform: rotate(45deg); }
+.technical > summary span:last-child { margin-left: auto; font: .72rem var(--mono); color: var(--muted); }
+.technical-body { display: grid; grid-template-columns: minmax(12.5rem, 24%) minmax(0, 1fr); gap: 1.45rem; margin: 0 1.15rem 1.15rem; padding-top: 1rem; border-top: 1px solid #40332b; }
+.method-rail { display: grid; align-content: start; gap: .24rem; min-width: 0; margin: 0; padding: 0 0 0 .55rem; list-style: none; border-left: 1px solid #58443a; }
+.method-rail a { position: relative; display: block; padding: .46rem .65rem; border-radius: .45rem; text-decoration: none; color: var(--muted); font-size: .82rem; line-height: 1.35; transition: background .2s, color .2s; }
+.method-rail a::before { content: ""; position: absolute; left: -.77rem; top: .76rem; width: .37rem; height: .37rem; border: 1px solid #9b6c51; border-radius: 50%; background: #2c201a; }
+.method-rail a[aria-current="step"] { color: #ffd6bc; background: #ef8a4c17; box-shadow: inset 0 0 0 1px #ef8a4c38; }
+.method-rail a[aria-current="step"]::before { background: var(--accent); border-color: #ffbb91; box-shadow: 0 0 11px #ffad7a91; }
+.method-rail a:hover { color: #ffccb0; background: #ef8a4c12; }
+.method-panel { min-width: 0; }
+.method-panel h3 { margin: 0; font-size: clamp(1.15rem, 2vw, 1.55rem); letter-spacing: -.035em; line-height: 1.2; }
+.method-panel h3:focus { outline: none; }
+.method-panel p { margin: .56rem 0 .7rem; color: var(--muted); font-size: .875rem; line-height: 1.55; max-width: 77ch; }
+.method-panel pre { margin: .68rem 0; padding: .72rem .83rem; border: 1px solid #4c3c34; border-radius: .52rem; background: #11100f; white-space: pre-wrap; overflow-wrap: anywhere; color: #ffccae; }
+.method-panel pre code { font: .77rem/1.65 var(--mono); }
+.method-table { margin-block: .65rem; border: 1px solid #4b3d36; border-radius: .52rem; overflow-x: auto; }
+.method-table table { width: 100%; border-collapse: collapse; color: var(--text); font-size: .78rem; line-height: 1.45; font-variant-numeric: tabular-nums; }
+.method-table th { background: #2a211d; color: #ffd4bd; font-weight: 600; text-align: left; }
+.method-table th, .method-table td { padding: .38rem .64rem; border-bottom: 1px solid #3e332d; white-space: nowrap; }
+.method-table tr:last-child td { border-bottom: 0; }
+.method-panel a { color: #f2a97d; font-size: .8rem; font-weight: 620; }
+.method-links { display: flex; flex-wrap: wrap; gap: .46rem 1rem; margin-top: .8rem; }
+.method-read { margin-top: .5rem; padding: .64rem .78rem; border: 1px solid #4c3b41; border-radius: .52rem; background: #141111; }
+.method-read summary { cursor: pointer; color: var(--incident); }
+.method-read summary code { font: .78rem var(--mono); overflow-wrap: anywhere; }
+.method-read summary span { float: right; color: var(--muted); font-size: .72rem; }
+@media (max-width: 690px) {
+  .technical-body { grid-template-columns: minmax(0, 1fr); gap: 1.05rem; }
+  .method-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); border-left: 0; padding: 0; gap: .31rem; }
+  .method-rail a { padding: .38rem .46rem; border: 1px solid #3f342e; }
+  .method-rail a::before { display: none; }
+}
+
 @media (max-width: 760px) {
   .shell { width: calc(100% - 2.5rem); }
   .hero { min-height: 19rem; grid-template-columns: minmax(0, 1fr); }
