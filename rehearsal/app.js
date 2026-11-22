@@ -83,6 +83,10 @@ const steps = [
         line("Payment transition", `Germany · mobile · Stripe. ${percent.format(reading.observed)} of eligible attempts completed (${reading.completed} of ${reading.eligible}) versus ${percent.format(reading.expected)} expected.`),
         line("Evidence window", `${time(window.window_start)}–${time(window.window_end)} virtual UTC. Eye evaluated it at ${time(window.observed_at)} after the 15-minute ingestion grace period.`)
       ];
+      const firstAlert = data.run?.evaluation?.first_alert;
+      if (firstAlert && firstAlert.metric_id !== "payment_success_rate") {
+        notes.push(line("Lab timeline", `Its first-alert row lists ${firstAlert.metric_name}. This stop follows the scoped Payment success incident.`));
+      }
       if (incident.trigger?.detection_reference?.denominator) {
         const trigger = incident.trigger;
         const reference = trigger.detection_reference;
@@ -101,7 +105,7 @@ const steps = [
     id: "registration",
     title: "Live metric registration",
     summary: "Registering Payment timeout rate adds a calculation, readings, and graph links using payment telemetry already flowing through Eye.",
-    guidance: "In Table, find Payment timeout rate. Click Register if it is awaiting registration, or click the metric name to open Metric Insights and its Connections tab when available. Scoped replay readings opens the fault windows directly.",
+    guidance: "In Table, find Payment timeout rate. Click Register if it is awaiting registration, or click the metric name to open Metric Insights. Use the graph connections and scoped replay readings below for the selected run.",
     links: (data) => [
       ["Open Eye metric catalog ↗", EYE + "/#table-tab"],
       ...(data?.readings_url ? [["Scoped replay readings ↗", data.readings_url]] : [])
