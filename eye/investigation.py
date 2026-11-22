@@ -13,6 +13,7 @@ from eye.intervals import CADENCE, HOUR, aligned_history
 from eye.investigation_branches import build_branches
 from eye.model import ask
 from eye.observation import observation_tool
+from eye.shared_incidents import COMPLETENESS, cohort_plan, source_plans
 from eye.transitions import ALERT_STEPS, BY_ID, POSITIONS, WORKFLOW, Readings, compatible
 
 log = logging.getLogger(__name__)
@@ -300,8 +301,10 @@ def finish_next_branch(dsn, stop):
                where report->>'deep_investigation' = 'pending'
                   or (report->>'branch_waits_for_receipts' = 'true'
                       and (report->>'branch_observed_through')::timestamptz < %s)
+                  or (report->>'branch_revisit' = 'true'
+                      and (report->>'branch_observed_through')::timestamptz + interval '15 minutes' <= %s)
                order by (report->>'deep_investigation' = 'pending') desc, id limit 1""",
-            (cutoff,),
+            (cutoff, cutoff),
         ).fetchone()
         if not incident:
             return False
@@ -320,6 +323,7 @@ def finish_next_branch(dsn, stop):
             branches = previous
         fields = {"evidence_branches": branches, "deep_investigation": "complete",
                   "branch_waits_for_receipts": watch_receipts, "branch_observed_through": observed_through}
+        fields["branch_revisit"] = any(details.get("revisit") for _, details in findings)
         db.execute("update incidents set report = report || %s where id = %s", (jsonb(fields), incident["id"]))
         save_report_snapshot(db, incident["id"], "deeper", fields, [details for _, details in findings], observed_through)
         return True
@@ -412,18 +416,21 @@ def assign_workflow_alerts(readings, groups, alerts):
     return remaining
 
 
-def open_incident(db, tool, start, baseline, anchor, alerts, model, completion=None):
+def open_incident(db, tool, start, baseline, anchor, alerts, model, completion=None, explanation=None):
     incident_id = db.execute(
         """insert into incidents (metric_id, scope, opened_at, updated_at)
            values (%s, %s, %s, %s) returning id""",
         (anchor["metric_id"], jsonb(anchor["scope"]), start, start),
     ).fetchone()["id"]
     report, context = collect_evidence(db, tool, anchor, incident_id, baseline, completion)
+    if explanation:
+        report["shared_explanation"] = context["shared_explanation"] = explanation
+        report["likely_causes"] = [explanation["summary"]]
     if model:
         db.execute("insert into pending_reports values (%s, %s, %s)",
                    (incident_id, jsonb(context), jsonb(report)))
         report = {key: report[key] for key in
-                  ("summary", "affected_scope", "path", "first_observable_break") if key in report}
+                  ("summary", "affected_scope", "path", "first_observable_break", "shared_explanation") if key in report}
     if completion:
         report["break"] = completion
     else:
@@ -457,7 +464,8 @@ def attach_alerts(db, incident_id, start, alerts, kind):
 
 def track_other(db, tool, start, baseline, incidents, alerts, model, good_data, observed_at):
     for incident in incidents:
-        same = [row for row in alerts if row["metric_id"] == incident["metric_id"]
+        shared = incident["report"].get("shared_explanation", {})
+        same = [row for row in alerts if not shared and row["metric_id"] == incident["metric_id"]
                 and compatible(row["scope"], incident["scope"])]
         if same:
             attach_alerts(db, incident["id"], start, same, "ongoing anomaly")
@@ -472,6 +480,11 @@ def track_other(db, tool, start, baseline, incidents, alerts, model, good_data, 
         reading = current[-1] if current else None
         healthy = (good_data and reading and reading["value"] is not None
                    and (not ratio or reading["sample_size"] >= 30))
+        if shared.get("kind") == "source":
+            types = [tool("metric_readings", metric_id=COMPLETENESS, start=start, end=start + CADENCE,
+                          scope={**incident["scope"], "event_type": event}) for event in shared["event_types"]]
+            healthy = reading and reading["value"] is not None and reading["value"] >= .97 and all(
+                rows and rows[-1]["value"] is not None and rows[-1]["value"] >= .97 for rows in types)
         update_recovery(db, incident, start, reading, healthy, metric_node(incident["metric_id"]), observed_at)
 
     while alerts:
@@ -484,6 +497,47 @@ def track_other(db, tool, start, baseline, incidents, alerts, model, good_data, 
         open_incident(db, tool, start, baseline, anchor, cohort, model)
 
 
+def apply_shared(db, tool, start, baseline, plan, alerts, incidents, model, observed_at):
+    kind, scope, metric = (plan[key] for key in ("kind", "scope", "metric_id"))
+    matching = [row for row in plan["alerts"] if row in alerts]
+    if not matching:
+        return None
+    relation = {"source": "shared receipt loss", "stock": "shared inventory dependency", "search": "matched search cohort"}[kind]
+    if plan["confidence"] == "provisional":
+        relation = "provisional " + relation
+    attached = [dict(row, relationship=relation) for row in matching]
+    explanation = {key: value for key, value in plan.items() if key not in {"incident", "alerts"}}
+    incident = plan["incident"]
+    if not incident:
+        incident = next((item for item in incidents if item["metric_id"] == metric and item["scope"] == scope
+                         and not item["report"].get("break")), None)
+    if not incident and kind == "source":
+        # A narrow receipt breach may have opened first while sibling samples were sparse.
+        initial = [item for item in incidents if item["metric_id"] == metric
+                   and item["scope"].get("source_id") == scope["source_id"]
+                   and item["scope"].get("event_type") in plan["event_types"] and start - item["updated_at"] < HOUR]
+        if len(initial) == 1:
+            incident = initial[0]
+            db.execute("update incidents set scope=%s where id=%s", (jsonb(scope), incident["id"]))
+    if incident:
+        db.execute("update incidents set report=report || %s where id=%s",
+                   (jsonb({"shared_explanation": explanation, "affected_scope": scope}), incident["id"]))
+        attach_alerts(db, incident["id"], start, attached, "ongoing anomaly")
+        update_recovery(db, incident, start, None, False, None, observed_at)
+        identifier = incident["id"]
+    else:
+        anchor = next((row for row in attached if row["metric_id"] == metric and row["scope"] == scope), None)
+        if not anchor:
+            reading = signal(tool, metric, start, scope, baseline)
+            if reading is None or reading["expected"] is None:
+                return None
+            anchor = {**reading, "window_start": start, "window_end": start + HOUR, "observed_at": observed_at}
+        identifier = open_incident(db, tool, start, baseline, anchor, attached, model, explanation=explanation)
+    for row in matching:
+        alerts.remove(row)
+    return identifier
+
+
 def track(db, start, anomalies, model=None, *, history=None, facts=None, observed_at=None):
     open_incidents = db.execute("select * from incidents where recovered_at is null order by id").fetchall()
     if not anomalies and not open_incidents:
@@ -494,6 +548,12 @@ def track(db, start, anomalies, model=None, *, history=None, facts=None, observe
     good_data = not health or (health[-1]["value"] is not None and health[-1]["value"] >= 0.97)
     remaining = list(anomalies)
     accounted = set()
+    current_facts = (facts or {}).get(start)
+    for plan in source_plans(anomalies, open_incidents, current_facts):
+        identifier = apply_shared(db, tool, start, baseline, plan, remaining, open_incidents, model, observed_at)
+        if identifier:
+            accounted.add(identifier)
+    readings, groups = None, []
     if any(row["metric_id"] in ALERT_STEPS for row in anomalies) or any(
             incident["report"].get("break", {}).get("id") in BY_ID for incident in open_incidents):
         if history is not None:
@@ -504,7 +564,19 @@ def track(db, start, anomalies, model=None, *, history=None, facts=None, observe
             ).fetchall()}
             history = [date for date in history if date not in discarded]
         readings = Readings(db, start, baseline, history, facts)
-        groups = workflow_groups(readings, open_incidents, anomalies if good_data else [])
+        groups = workflow_groups(readings, open_incidents, remaining if good_data else [])
+    if good_data and current_facts and observed_at:
+        for kind in ("stock", "search"):
+            plan = cohort_plan(db, kind, start, observed_at, remaining, open_incidents, groups, current_facts)
+            if plan:
+                if readings:
+                    plan["completion_checks"] = [readings.get(step, plan["scope"]) for step in WORKFLOW
+                                                 if POSITIONS[step.id] >= POSITIONS["checkout"]]
+                identifier = apply_shared(db, tool, start, baseline, plan, remaining, open_incidents, model, observed_at)
+                if identifier:
+                    accounted.add(identifier)
+    if readings:
+        groups = workflow_groups(readings, open_incidents, remaining if good_data else [])
         remaining = assign_workflow_alerts(readings, groups, remaining)
         for group in groups:
             completion, attached = group["completion"], group["alerts"]

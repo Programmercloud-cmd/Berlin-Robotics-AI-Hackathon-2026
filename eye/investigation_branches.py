@@ -6,6 +6,7 @@ from statistics import median
 
 from psycopg.types.json import Jsonb
 
+from eye.cohort_evidence import graph_path, read_cohorts, supports_link
 from eye.intervals import GRACE, HOUR, aligned_history
 PAYMENT_EVENTS = ("payment_attempted", "payment_succeeded", "payment_timed_out", "payment_declined")
 PAYMENT_CONTEXT = (*PAYMENT_EVENTS, "order_confirmed")
@@ -432,7 +433,7 @@ def upstream_branches(db, incident, start, at_detection, history, *, rolling=Fal
         now, baseline = current.get(activity, 0) / total, prior.get(activity, 0) / historic
         label = activity.replace("_", " ")
         results.append(hypothesis(f"Earlier change in {label}",
-                                  [f"{label.capitalize()} preceded the detected stage in the discovered workflow.",
+                                  [f"The discovered workflow connects {label} to the measured stage.",
                                    f"{now:.1%} of matched sessions had this earlier activity versus {baseline:.1%} in baseline windows."],
                                   unresolved=["The observed sequence supports an upstream connection. A common cause remains possible."],
                                   evidence={"scope": scope, "activity": activity, "observed": now, "expected": baseline,
@@ -446,6 +447,82 @@ def upstream_branches(db, incident, start, at_detection, history, *, rolling=Fal
                                  "current": current, "baseline": prior})]
 
 
+def receipt_branch(db, scope, start, cutoff, event_types):
+    source = scope["source_id"]
+    rows = db.execute(
+        """with expected as (
+               select event_type, sum(expected) as n from source_manifests where source_id=%s
+               and minute_at >= %s and minute_at < %s group by event_type
+           ), received as (
+               select activity, count(*) as n from events where occurred_at >= %s and occurred_at < %s
+               and ingested_at <= %s and attrs->>'source_id'=%s group by activity
+           ) select event_type, expected.n as expected, coalesce(received.n,0) as received
+             from expected left join received on activity=event_type where event_type=any(%s)
+             order by event_type""",
+        (source, start, start + HOUR, start, start + HOUR, cutoff, source, event_types),
+    ).fetchall()
+    gaps = [row for row in rows if row["received"] < row["expected"]]
+    return hypothesis("Shared source receipt loss",
+                      [f"{row['event_type']}: {row['received']} of {row['expected']} expected receipts from {source}."
+                       for row in gaps],
+                      unresolved=["Missing telemetry cannot distinguish missing delivery from business outcomes.",
+                                  "The shared source supports grouping. The precise delivery failure mechanism is unverified."],
+                      evidence={"scope": scope, "manifest_comparison": rows, "cutoff": cutoff})
+
+
+def matched_branch(db, incident, start, cutoff, kind):
+    path = graph_path(db, kind)
+    if not path:
+        return None
+    limit = start + HOUR + timedelta(minutes=30)
+    end = min(limit, max(start + HOUR, cutoff - GRACE))
+    scope = incident["scope"]
+    evidence = read_cohorts(db, kind, start, end, cutoff, scope)
+    if not evidence["preceded"] and kind == "search":
+        return None
+    shared = incident["report"].get("shared_explanation", {})
+    checks = shared.get("completion_checks", [])
+    evidence.update(scope=scope, graph_path=path, end=end, cutoff=cutoff,
+                    completion_checks=checks, revisit=end < limit)
+    supported, weakened, unresolved = [], [], []
+    if evidence["first_change"]:
+        at = evidence["first_change"].strftime("%H:%M:%S UTC")
+        prefix = "A SKU changed from positive stock to zero before carts reached checkout" if kind == "stock" else \
+            "Search rollout requests preceded recommendation exposure and ordering opportunities"
+        supported.append(f"{prefix}. The earliest linked upstream reading was at {at}.")
+    targets = ("checkout entry",) if kind == "stock" else ("recommendation exposure", "cart entry", "orders per shopper")
+    for target in targets:
+        rate = evidence["rates"][target]
+        if rate["status"] == "insufficient":
+            unresolved.append(f"Too few exposed and comparable unexposed shoppers to resolve {target}.")
+            continue
+        caption = (f"Matched {target} was {rate['exposed']:.1%} in exposed traffic and {rate['control']:.1%} "
+                   f"in controls ({rate['matched_exposed']} and {rate['matched_control']} eligible).")
+        destination = supported if rate["status"] == "lower" else unresolved if rate["status"] == "inconclusive" else weakened
+        destination.append(caption)
+    if kind == "search":
+        direct = evidence["rates"]["direct orders per shopper"]
+        assisted = evidence["rates"]["assisted orders per shopper"]
+        if direct["gap"] is not None and assisted["gap"] is not None:
+            supported.append(f"Per 100 matched searchers, direct orders changed by {100 * direct['gap']:+.1f} "
+                             f"and linked assisted orders by {100 * assisted['gap']:+.1f}.")
+            if assisted["gap"] < 0 and direct["gap"] + assisted["gap"] < 0:
+                supported.append("Direct purchases did not fully offset the linked assisted-order loss.")
+    paid = evidence["rates"]["payment success"]
+    if paid["status"] in {"steady", "lower", "higher"}:
+        caption = f"Conditional payment success was {paid['exposed']:.1%} versus {paid['control']:.1%}."
+        (weakened if paid["status"] == "lower" else supported).append(caption)
+    elif steady := [row for row in checks if row["id"] in {"payment_attempt", "payment", "order"} and row["status"] == "steady"]:
+        supported.append("Among shoppers who reached them, these rates stayed near their own historical baselines: "
+                         + ", ".join(row["label"] for row in steady) + ".")
+    else:
+        unresolved.append("The linked samples do not establish whether downstream conditional success held.")
+    unresolved.append("Exposure is matched by customer segment and time. Other concurrent changes remain possible.")
+    evidence["status"] = "supported" if supports_link(kind, evidence) else "provisional"
+    title = "Availability preceded a checkout loss" if kind == "stock" else "Matched rollout, recommendation exposure, and sales"
+    return hypothesis(title, supported, weakened, unresolved, evidence=evidence)
+
+
 def build_branches(db, incident, cutoff, baseline):
     start = incident["opened_at"]
     window = incident["report"].get("observation_window")
@@ -456,11 +533,19 @@ def build_branches(db, incident, cutoff, baseline):
     history = aligned_history(start, baseline) if window else baselines(db, start, baseline)
     metric = incident["metric_id"]
     branches, watch_receipts = [], False
-    event_type = incident["scope"].get("event_type")
-    if metric in PAYMENT_SIGNALS and (not event_type or event_type in PAYMENT_EVENTS):
+    scope = incident["scope"]
+    event_type = scope.get("event_type")
+    shared = incident["report"].get("shared_explanation", {})
+    kind = shared.get("kind")
+    if kind == "source":
+        branches.append(receipt_branch(db, scope, start, at_detection, shared["event_types"]))
+    if metric in PAYMENT_SIGNALS and scope.get("source_id") in {None, "payments"} and (not event_type or event_type in PAYMENT_EVENTS):
         branches, watch_receipts = payment_branches(db, start, incident["scope"], at_detection, cutoff, history,
                                                    rolling=bool(window))
-    if metric in SALES_SIGNALS:
+    if window and kind in {"stock", "search"}:
+        if branch := matched_branch(db, incident, start, cutoff, kind):
+            branches.append(branch)
+    elif metric in SALES_SIGNALS:
         branches.extend(sales_branches(db, start, incident["scope"], at_detection, history, rolling=bool(window)))
     if not branches:
         branches.extend(upstream_branches(db, incident, start, at_detection, history, rolling=bool(window)))
