@@ -110,9 +110,12 @@ class InvestigationTest(unittest.TestCase):
         formula = {"op": "ratio", "activity": "resolved", "denominator_activity": "eligible"}
         current = [{"value": .5, "sample_size": 120, "details": {}}]
         history = [{"value": .9, "sample_size": 100, "details": {}}] * 3
-        result = decompose_metric(formula, current, history)
+        recent = [{"window_start": "nearby", "value": .9, "sample_size": 118, "details": {}}]
+        result = decompose_metric(formula, current, history, recent)
         self.assertEqual(result["historical_windows"], 3)
         self.assertAlmostEqual(result["rate_change"], -.4)
         self.assertLess(result["numerator"]["rate_contribution"], 0)
         self.assertLess(result["denominator"]["rate_contribution"], 0)
         self.assertAlmostEqual(result["residual"], 0)
+        self.assertAlmostEqual(result["outcome_gap_at_observed_eligibility"], -48)
+        self.assertEqual(result["recent_checks_within_10_percent_of_eligible_volume"][0]["eligible"], 118)

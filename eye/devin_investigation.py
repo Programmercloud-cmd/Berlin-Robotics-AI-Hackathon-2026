@@ -22,10 +22,11 @@ the alert scope, or send {} for marketplace and a JSON object for an explicitly 
 Tools and their arguments:
 - graph_neighbors: target is an exact node ID. Incoming and outgoing typed edges describe relationships.
 - metric_definition, metric_readings, metric_breakdown: target is a metric ID without the metric: prefix.
-  Readings compare the current scope with aligned historical readings. Breakdown can enumerate broader
+  Readings include current, recent, and time-aligned history. Breakdown can enumerate broader
   comparisons when given scope {}.
 - decompose_metric: target is a metric ID with a declared ratio. Quantifies how its observed
-  numerator and denominator contribute to the deviation against aligned history.
+  numerator and denominator contribute to the deviation against aligned history. Also tests the
+  observed outcome count at the historical rate and shows recent checks with similar eligible volume.
 - activity_mix: activities are event names from the metric calculation or discovered graph. Compares
   event counts against the same scoped historical hours at equal ingestion maturity.
 - supporting_events: activities are event names. Returns a few observed payloads with linked objects.
@@ -33,9 +34,12 @@ Cite supplied E-prefixed evidence IDs in the report. If reads returned evidence,
 Include a plausible alternative, what weakens it, and the evidence IDs for that comparison. When the
 evidence cannot test an alternative, say so. Distinguish event counts from unique entities, delayed
 visibility from workflow failure, and symptoms from causes. Report the scope the evidence supports.
-For a ratio, compare outcomes per eligible entity. Compare matched, unaffected scopes where available.
-An increase in both totals does not establish that increased intake caused a drop in completion rate.
-Attribute samples to the sampled records and distinguish arithmetic contributions from causal evidence.
+For a ratio, compare outcomes per eligible entity. A rise in the absolute outcome count does not rule
+out genuine degradation per eligible entity. Holding the rate constant, higher volume would increase
+both counts proportionally. If a recent check with similar eligible volume had a healthy rate, compare
+the rates and use that observation to test the intake-only explanation. Quantify excess failures or
+missing outcomes at the observed level of eligibility. These arithmetic results do not identify the
+underlying cause. Respect the stated direction of graph edges and limit sample claims to sampled records.
 Keep raw event IDs out of the prose. Never infer hosting or engineering causes without direct evidence.
 State why you stopped and which uncertainty remains. Avoid invented facts or quantities."""
 
@@ -128,7 +132,7 @@ def evidence_record(title, tool, params, signal, start, end, cutoff, entity, res
             "entity": entity, "signal": signal, "result": result, "interpretation": interpretation}
 
 
-def decompose_metric(formula, latest, historical):
+def decompose_metric(formula, latest, historical, recent=()):
     """Split a declared ratio deviation by averaging both possible input-change orders."""
     if formula.get("op") != "ratio" or not formula.get("denominator_activity"):
         return {"available": False, "reason": "The metric does not declare both activities of a ratio."}
@@ -143,8 +147,20 @@ def decompose_metric(formula, latest, historical):
     delta = numerator / denominator - expected_n / expected_d
     numerator_part = (numerator - expected_n) * (1 / denominator + 1 / expected_d) / 2
     denominator_part = (numerator + expected_n) * (1 / denominator - 1 / expected_d) / 2
+    expected_at_current_volume = expected_n / expected_d * denominator
+    comparable = []
+    for row in recent:
+        if row["value"] is None or not row["sample_size"]:
+            continue
+        outcomes, eligible = rate_counts(row)
+        if abs(eligible - denominator) <= denominator * .10:
+            comparable.append({"window_start": row["window_start"], "outcomes": outcomes,
+                               "eligible": eligible, "rate": row["value"]})
     return {"available": True, "historical_windows": len(samples), "observed_rate": numerator / denominator,
             "expected_rate": expected_n / expected_d, "rate_change": delta,
+            "expected_outcomes_at_observed_eligibility": expected_at_current_volume,
+            "outcome_gap_at_observed_eligibility": numerator - expected_at_current_volume,
+            "recent_checks_within_10_percent_of_eligible_volume": comparable[-6:],
             "numerator": {"activity": formula["activity"], "observed": numerator, "expected": expected_n,
                           "rate_contribution": numerator_part},
             "denominator": {"activity": formula["denominator_activity"], "observed": denominator, "expected": expected_d,
@@ -176,10 +192,10 @@ def read_query(dsn, snapshot, read):
             latest = tool("metric_readings", start=start, end=start + CADENCE, limit=1, **args)
             historical = tool("metric_readings", start=dates[-1], end=dates[0] + CADENCE,
                               aligned_to=start, limit=4, **args)
+            recent = tool("metric_readings", start=start - HOUR, end=start, limit=12, **args)
             if read.tool == "decompose_metric":
-                return decompose_metric(definitions[read.target]["calculation"], latest, historical)
-            previous = tool("metric_readings", start=start - HOUR, end=start - HOUR + CADENCE, limit=1, **args)
-            return {"latest": latest, "aligned_reference": historical, "previous_hour": previous}
+                return decompose_metric(definitions[read.target]["calculation"], latest, historical, recent)
+            return {"latest": latest, "aligned_reference": historical, "recent_checks": recent}
         if read.tool == "metric_breakdown":
             return tool(read.tool, metric_id=read.target, window_start=start, as_of=cutoff, scope=scope, limit=14)
         known = {item["id"].removeprefix("activity:") for item in snapshot["graph"]["nodes"]
