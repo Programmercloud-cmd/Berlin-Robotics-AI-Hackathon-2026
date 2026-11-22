@@ -1,6 +1,7 @@
 """The monitor consumes committed observation windows from PostgreSQL."""
 
 import logging
+import os
 from datetime import datetime
 
 from psycopg.types.json import Jsonb
@@ -42,12 +43,14 @@ def initialize(dsn):
         if baseline is None:
             return False
         graph.discover(db)
-        staged = db.execute("select id from metrics where id = any(%s)", (list(STAGED),)).fetchall()
-        for metric in [*INITIAL_METRICS, *(CATALOG[row["id"]] for row in staged)]:
-            curation.curate(db, metric)
-        db.execute("update metrics set direction = 'none' where id = any(%s)", (list(LEGACY),))
-        if previous:
-            db.execute("""delete from observations where metric_id = any(%s)""", (list(CATALOG),))
+        instrumentation = state(db, "instrumentation") or {}
+        if instrumentation.get("catalog", "marketplace") == "marketplace":
+            staged = db.execute("select id from metrics where id = any(%s)", (list(STAGED),)).fetchall()
+            for metric in [*INITIAL_METRICS, *(CATALOG[row["id"]] for row in staged)]:
+                curation.curate(db, metric)
+            db.execute("update metrics set direction = 'none' where id = any(%s)", (list(LEGACY),))
+            if previous:
+                db.execute("""delete from observations where metric_id = any(%s)""", (list(CATALOG),))
         monitor.materialize(db)
         graph.associate(db)
         if not previous:
@@ -119,7 +122,10 @@ def step(dsn, model=None):
         if discover:
             graph.associate(db)
         anomalies = monitor.detect(db, start, dates, observed_at)
-        investigation.track(db, start, anomalies, model, history=dates, facts=facts, observed_at=observed_at)
+        if os.getenv("EYE_INVESTIGATION") == "generic":
+            investigation.track_generic(db, start, anomalies, model, dates, facts.get(start), observed_at)
+        else:
+            investigation.track(db, start, anomalies, model, history=dates, facts=facts, observed_at=observed_at)
         set_state(db, "last_window", start.isoformat())
         set_state(db, "last_observed_at", observed_at.isoformat())
         log.info("Observed %s–%s UTC · %d anomalies", start.strftime("%H:%M"), end.strftime("%H:%M"), len(anomalies))

@@ -8,6 +8,7 @@ from random import Random
 
 from psycopg.types.json import Jsonb
 
+from eye.ingestion import publish_window
 from eye.intervals import CADENCE, GRACE, HOUR
 
 DEMO_START = datetime(2026, 11, 21, 9, tzinfo=timezone.utc)
@@ -276,7 +277,6 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
         add_event("inventory_snapshot", timedelta(minutes=59),
                   {"sku": sku, "available_units": units, **ALL_PRODUCTS[sku]}, [(sku, "product")])
 
-    expected_events = len(events)
     manifest = Counter((row[2].replace(second=0, microsecond=0), row[5].obj["source_id"], row[1])
                        for row in events)
     if storefront_loss:
@@ -286,27 +286,8 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
         events = [row for row in events if row[0] not in dropped]
         links = [row for row in links if row[0] not in dropped]
 
-    window = db.execute(
-        """insert into windows (start_at, end_at, expected_events, observation_snapshot, published_through)
-           values (%s, %s, %s, %s, %s)
-           on conflict (start_at) do nothing returning start_at""",
-        (start, start + HOUR, expected_events, start + HOUR + GRACE, start if staged else None),
-    ).fetchone()
-    if not window:
-        return
-    with db.cursor() as cursor:
-        cursor.executemany(
-            "insert into objects values (%s, 'product', %s) on conflict (id) do nothing",
-            [(sku, Jsonb(attrs)) for sku, attrs in ALL_PRODUCTS.items()],
-        )
-        events.sort(key=lambda row: row[2])
-        for table, data in (("objects", objects), ("events", events), ("event_objects", links)):
-            with cursor.copy(f"copy {table} from stdin") as copy:
-                for row in data:
-                    copy.write_row(row)
-        with cursor.copy("copy source_manifests from stdin") as copy:
-            for (minute, source, activity), count in manifest.items():
-                copy.write_row((start, minute, source, activity, count))
+    products = [(sku, "product", Jsonb(attrs)) for sku, attrs in ALL_PRODUCTS.items()]
+    publish_window(db, start, [*products, *objects], events, links, manifest, staged=staged)
 
 
 def publication_ticks(start, *, drain=False):

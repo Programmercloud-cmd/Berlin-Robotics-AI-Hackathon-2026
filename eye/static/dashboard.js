@@ -591,6 +591,32 @@ function renderReport(target, incident) {
   reportSection(target, "Likely causes", report.likely_causes);
   reportSection(target, "Business impact", report.impact);
   reportSection(target, "Uncertainty", report.uncertainty);
+  if (report.alternative) {
+    reportSection(target, "Alternative considered", report.alternative.alternative);
+    reportSection(target, "What weakened it", report.alternative.weakened_by);
+  }
+  reportSection(target, "Why Devin stopped", report.stop_reason);
+  const citations = new Set([...(report.evidence_ids || []), ...(report.alternative?.evidence_ids || [])]);
+  if (citations.size) {
+    const links = element("div", null, "report-section");
+    links.append(element("h3", "Cited evidence"));
+    for (const identifier of citations) {
+      const button = element("button", identifier, "path-step");
+      button.type = "button";
+      button.addEventListener("click", async () => {
+        const disclosure = target.querySelector(".evidence-list");
+        await loadEvidence(incident.id, disclosure.lastElementChild);
+        disclosure.open = true;
+        const record = disclosure.querySelector(`[data-evidence-id="${identifier.slice(1)}"]`);
+        if (record) {
+          record.open = true;
+          record.scrollIntoView({ block: "nearest" });
+        }
+      });
+      links.append(button);
+    }
+    target.append(links);
+  }
   if (report.uncertain_relationships?.length) {
     reportSection(target, "Uncertain downstream relationships",
       "Too little evidence to attribute these changes: " + report.uncertain_relationships.join(", ") + ".");
@@ -690,7 +716,16 @@ async function loadEvidence(id, target) {
       details.dataset.evidenceId = id;
       const title = [words(row.kind), row.payload?.title || (row.node_id && name(row.node_id)),
         date(row.window_start) + " UTC"].filter(Boolean).join(" · ");
-      details.append(element("summary", title), element("pre", JSON.stringify(row.payload, null, 2)));
+      const investigation = row.kind.startsWith("investigation ");
+      details.append(element("summary", investigation ? `E${id} · ${title}` : title));
+      if (row.payload?.tool) {
+        const evidence = row.payload;
+        details.append(element("p", evidence.interpretation),
+          element("p", [words(evidence.signal), evidence.entity, evidence.window?.map(date).join("–") + " UTC",
+            evidence.observed_through && "Observed through " + date(evidence.observed_through) + " UTC"].filter(Boolean).join(" · "),
+          "panel-meta"));
+      }
+      details.append(element("pre", JSON.stringify(row.payload, null, 2)));
       return details;
     });
     if (!entries.length) target.replaceChildren(element("p", "Evidence is being collected.", "placeholder"));

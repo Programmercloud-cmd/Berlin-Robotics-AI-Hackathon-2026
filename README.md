@@ -73,6 +73,22 @@ Add a **Run description** before starting to record the change or question you a
 
 ## Live reasoning
 
+The existing marketplace investigation and grouping remain the default. Opt in to the shared investigation policy with `EYE_INVESTIGATION=generic EYE_MODEL=devin`. Set both variables before launching the lab or Eye server. The feature branch starts from Eye commit `66c414f29a283699e87ce3df8bf11b22b34160db`.
+
+In shared mode, Eye opens the incident from observed measurements and gives Devin the alert, scoped historical readings, sample sizes, delivery completeness, and typed graph neighbours. Devin can select up to three local reads per batch, with at most two batches. Eye stores the reads, their fixed observation cutoff, and the cited conclusion inside **View evidence**. It attempts to continue the same Devin session and starts a continuation with the same evidence if necessary. Monitoring and recovery run independently. If the model cannot return a valid cited report, Eye saves its statistical report.
+
+Shared grouping uses overlapping time and matching observed measurement inputs. A scoped rate alert can explain a broader alert when the estimated rate outside that scope holds near baseline. A count can join a ratio alert when it matches the declared numerator and the eligible volume holds near its historical reference. Sparse evidence and independent degradation stay separate. Marketplace workflow, checkout, search, inventory, and source-specific grouping stay in the default mode. The shared replays use only explicitly registered metrics. A publisher with its own catalog can set runtime instrumentation metadata to `{"catalog":"none"}` before startup.
+
+To replay seed 42 with a local PostgreSQL instance, configure Devin in `.env` and run these in separate terminals. The dashboards remain available for inspecting the evidence until the commands stop. The fixture writes evidence to `.runtime/devin-investigation/` and prints each run directory.
+
+```sh
+EYE_INVESTIGATION=generic EYE_MODEL=devin DEVIN_MODE=lite python -m eye.investigation_replay marketplace --port 8030
+EYE_INVESTIGATION=generic EYE_MODEL=devin DEVIN_MODE=lite python -m eye.investigation_replay support --port 8031
+EYE_MODEL=local python -m eye.investigation_replay marketplace --port 8032
+```
+
+The support replay discovers ticket activities from the same event ingestion path, registers resolution per eligible ticket without placement hints, and compares a healthy intake increase with a scoped resolution break. The last command exercises the default marketplace path with the statistical writer.
+
 Run `EYE_MODEL=codex python -m eye lab` to use an authenticated Codex CLI on your PATH. To use an OpenAI-compatible JSON chat completions provider, leave `EYE_MODEL` empty and set `MODEL_NAME`, `MODEL_API_KEY` and, if applicable, `MODEL_BASE_URL`. Set `EYE_MODEL=local` to use Eye’s statistical reports and calculation-based curation directly. Eye also uses those fallbacks when its reasoning provider is unavailable. The report records which reasoning path ran. [Environment example](.env.example)
 
 ### Devin API v3

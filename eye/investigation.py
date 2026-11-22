@@ -4,14 +4,18 @@ import json
 import logging
 from collections import deque
 from datetime import datetime
+from math import sqrt
 from statistics import fmean
 
 from psycopg.types.json import Jsonb
 
 from eye.db import connect, state
+from eye import devin_investigation, monitor
+from eye.devin import DevinReasoner
 from eye.intervals import CADENCE, HOUR, aligned_history
 from eye.investigation_branches import build_branches
 from eye.model import ask
+from eye.metric_policy import check_due, default_cadence
 from eye.observation import observation_tool
 from eye.downstream_impact import ATTEMPT_VOLUME
 from eye.seasonality import readings_at
@@ -259,17 +263,35 @@ def finish_next_report(dsn, model, stop):
         db.commit()
         if not job or stop.is_set():
             return False
+        context = job["context"]
+        snapshot = context.pop("devin_investigation", None)
+        report = job["fallback"]
         try:
-            report = resolve_report(model, job["context"], job["fallback"])
+            if snapshot and isinstance(model, DevinReasoner):
+                def record(kind, payload):
+                    # Keep every completed read visible while the provider considers it.
+                    with db.transaction():
+                        return f"E{add_evidence(db, job['incident_id'], snapshot['start'], kind, payload)}"
+
+                diagnosis, evidence = devin_investigation.run(dsn, model, snapshot, record)
+                context["devin_evidence"] = evidence
+                record("investigation conclusion", {
+                    "title": "Devin’s conclusion" if diagnosis else "Statistical fallback",
+                    "observed_through": snapshot["cutoff"], **(diagnosis or report),
+                })
+                if diagnosis:
+                    report = {**report, **diagnosis, "deep_investigation": "complete"}
+            elif not snapshot:
+                report = resolve_report(model, context, report)
         except Exception as exc:
             log.warning("Investigation provider failed (%s). Using the statistical report.", type(exc).__name__)
-            report = job["fallback"]
         if stop.is_set():
             return False
+        if snapshot and report.get("investigation_method") != "devin_graph":
+            report = {**report, "deep_investigation": "complete"}
         db.execute("update incidents set report = report || %s where id = %s",
                    (jsonb(report), job["incident_id"]))
-        context = job["context"]
-        cutoff = (context.get("context", {}).get("window") or {}).get("observation_snapshot")
+        cutoff = snapshot["cutoff"] if snapshot else (context.get("context", {}).get("window") or {}).get("observation_snapshot")
         save_report_snapshot(db, job["incident_id"], "initial", report, context, cutoff)
         db.execute("delete from pending_reports where incident_id = %s", (job["incident_id"],))
         return True
@@ -421,7 +443,7 @@ def assign_workflow_alerts(readings, groups, alerts):
     return remaining
 
 
-def open_incident(db, tool, start, baseline, anchor, alerts, model, completion=None, explanation=None):
+def open_incident(db, tool, start, baseline, anchor, alerts, model, completion=None, explanation=None, *, legacy=True):
     incident_id = db.execute(
         """insert into incidents (metric_id, scope, opened_at, updated_at)
            values (%s, %s, %s, %s) returning id""",
@@ -431,7 +453,13 @@ def open_incident(db, tool, start, baseline, anchor, alerts, model, completion=N
     if explanation:
         report["shared_explanation"] = context["shared_explanation"] = explanation
         report["likely_causes"] = [explanation["summary"]]
+    devin_path = not legacy and isinstance(model, DevinReasoner)
     if model:
+        if devin_path:
+            def record(kind, payload):
+                return f"E{add_evidence(db, incident_id, start, kind, payload)}"
+
+            context["devin_investigation"] = devin_investigation.capture(db, tool, anchor, baseline, record)
         db.execute("insert into pending_reports values (%s, %s, %s)",
                    (incident_id, jsonb(context), jsonb(report)))
         report = {key: report[key] for key in
@@ -442,7 +470,7 @@ def open_incident(db, tool, start, baseline, anchor, alerts, model, completion=N
         metric = tool("metric_definition", metric_id=anchor["metric_id"])
         report["measurement"] = {"observed": anchor["observed"], "expected": anchor["expected"],
                                  "unit": metric["access"].get("unit", "count")}
-    report["deep_investigation"] = "pending"
+    report["deep_investigation"] = "pending" if legacy else "delegated" if devin_path else "complete"
     if anchor.get("observed_at"):
         report["observation_window"] = {key: anchor[key] for key in ("window_start", "window_end", "observed_at")}
     db.execute("update incidents set report = %s where id = %s", (jsonb(report), incident_id))
@@ -452,6 +480,137 @@ def open_incident(db, tool, start, baseline, anchor, alerts, model, completion=N
     attach_alerts(db, incident_id, start, [row for row in alerts if row["id"] != anchor.get("id")],
                   "related anomaly")
     return incident_id
+
+
+def contained_rate(first, second):
+    """Estimate the rest-of-cohort rate after subtracting the nested cohort."""
+    parent, child = sorted((first, second), key=lambda alert: len(alert["scope"]))
+    if not parent["scope"].items() < child["scope"].items():
+        return None
+    total, scoped = parent["sample_size"], child["sample_size"]
+    other = total - scoped
+    if min(scoped, other) < 30:
+        return None
+    baseline = (parent["expected"] * total - child["expected"] * scoped) / other
+    observed = (parent["observed"] * total - child["observed"] * scoped) / other
+    if not (0 <= baseline <= 1 and 0 <= observed <= 1):
+        return None
+    variability = max(.025, 3 * sqrt(baseline * (1 - baseline) / other))
+    deviation = (parent["observed"] - parent["expected"]) * total
+    remainder = (observed - baseline) * other
+    if abs(observed - baseline) <= variability and abs(remainder) <= .25 * abs(deviation):
+        return {"reason": "The nested cohort explains most of the change. The remaining rate is near baseline.",
+                "narrow_scope": child["scope"], "broad_scope": parent["scope"], "other_sample_size": other,
+                "other_observed_rate": observed, "other_expected_rate": baseline,
+                "broad_deviation": deviation, "unexplained_outcomes": remainder}
+    return None
+
+
+def matching_measurement(first, second, definitions):
+    """Require scope support, compatible direction and measured inputs before joining two signals."""
+    if (first["observed"] < first["expected"]) != (second["observed"] < second["expected"]):
+        return None
+    a, b = (definitions[row["metric_id"]]["calculation"] for row in (first, second))
+    if first["scope"] != second["scope"]:
+        if first["metric_id"] == second["metric_id"] and definitions[first["metric_id"]].get("op") in {"ratio", "share"}:
+            return contained_rate(first, second)
+        return None
+    if (a == b and abs(first["observed"] - second["observed"]) < .00001
+            and abs(first["expected"] - second["expected"]) < .00001):
+        return "Same scoped measurement and matching observed and expected values."
+    if a.get("op") == "ratio" and b.get("op") == "count":
+        first, second, a, b = second, first, b, a
+    if (a.get("op") != "count" or b.get("op") != "ratio" or a["activity"] != b["activity"]
+            or (a.get("where") or {}) != (b.get("where") or {})):
+        return None
+    reference = second.get("detection_reference") or {}
+    attempts = second["sample_size"]
+    available = reference.get("baseline_denominator")
+    periods = reference.get("references")
+    if attempts < 30 or not available or not periods:
+        return None
+    typical = available / periods
+    current_numerator = second["observed"] * attempts
+    if (abs(attempts - typical) <= max(typical * .10, 3 * typical ** .5)
+            and abs(current_numerator - first["observed"]) < .01
+            and abs(second["expected"] * typical - first["expected"]) < .01):
+        return "Count matches the declared ratio numerator while eligible volume remains in its historical range."
+    return None
+
+
+def track_generic(db, start, alerts, model, history, current, observed_at):
+    """Track registered measurements using declared semantics and observed cohorts."""
+    incidents = db.execute("select * from incidents where recovered_at is null order by id").fetchall()
+    if not incidents and not alerts:
+        return
+    definitions = {row["id"]: row for row in db.execute(
+        f"select m.*, {monitor.DETECTION_OP} as op from metrics m").fetchall()}
+    baseline = datetime.fromisoformat(state(db, "baseline_through"))
+    tool = observation_tool(db)
+    remaining = sorted(alerts, key=lambda row: (-row["score"], -len(row["scope"]), row["id"]))
+    expected = sum(current.manifest.values()) if current else 0
+    received = sum(current.received.values()) if current else 0
+    good_data = current and current.covered and not current.missing_manifest and expected and received / expected >= .97
+
+    def take_related(anchor, candidates):
+        related = []
+        for signal in candidates[:]:
+            if why := matching_measurement(anchor, signal, definitions):
+                candidates.remove(signal)
+                related.append(dict(signal, relationship="shared measured inputs", grouping_evidence=why))
+        return related
+
+    for incident in incidents:
+        metric, scope = incident["metric_id"], incident["scope"]
+        definition = definitions[metric]
+        if not check_due(definition, start):
+            continue
+        measurement = incident["report"].get("measurement")
+        matching = [alert for alert in remaining if alert["metric_id"] == metric and alert["scope"] == scope
+                    and start < incident["updated_at"] + HOUR
+                    and (not measurement or (alert["observed"] < alert["expected"])
+                         == (measurement["observed"] < measurement["expected"]))]
+        if matching:
+            for alert in matching:
+                remaining.remove(alert)
+            matching += take_related(matching[0], remaining)
+            attach_alerts(db, incident["id"], start, matching, "ongoing anomaly")
+        reading = db.execute("""select * from observations where metric_id=%s and window_start=%s and scope=%s""",
+                             (metric, start, jsonb(scope))).fetchone()
+        samples = monitor.baseline_readings(db, history, metric, scope)
+        if not matching and (not good_data or not reading or reading["value"] is None or len(samples) < 3):
+            continue
+        cadence = definition["access"].get("cadence_minutes", default_cadence(definition))
+        required = max(2, 60 // cadence)
+        if matching:
+            streak = 0
+        else:
+            level, _, size = monitor.baseline_level(samples, definition["op"])
+            noise = monitor.score_noise(definition["op"], level, reading["sample_size"], size, samples)
+            if noise is None:
+                continue
+            streak = incident["healthy_windows"] + 1 if abs(reading["value"] - level) < monitor.SCORE_THRESHOLD * noise else 0
+            if streak:
+                add_evidence(db, incident["id"], start, "recovery observation",
+                             {**reading, "expected": level, "history_windows": len(samples)}, metric_node(metric))
+        recovered = start if streak >= required else None
+        payload = ({"recovery_observed_at": observed_at, "recovery": f"Returned to baseline in {required} scheduled checks."}
+                   if recovered else {})
+        db.execute("""update incidents set updated_at=%s, healthy_windows=%s, recovered_at=%s,
+                      report=report || %s where id=%s""", (start, streak, recovered, jsonb(payload), incident["id"]))
+
+    while remaining:
+        anchor = remaining.pop(0)
+        if good_data:
+            narrower = next((row for row in sorted(remaining, key=lambda row: -len(row["scope"]))
+                             if row["metric_id"] == anchor["metric_id"] and len(row["scope"]) > len(anchor["scope"])
+                             and matching_measurement(anchor, row, definitions)), None)
+            if narrower:
+                remaining.remove(narrower)
+                remaining.insert(0, anchor)
+                anchor = narrower
+        cohort = take_related(anchor, remaining) if good_data else []
+        open_incident(db, tool, start, baseline, anchor, cohort, model, legacy=False)
 
 
 def attach_alerts(db, incident_id, start, alerts, kind):

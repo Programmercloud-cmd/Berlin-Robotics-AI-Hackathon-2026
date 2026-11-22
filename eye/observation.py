@@ -3,14 +3,14 @@
 import asyncio
 from contextlib import nullcontext
 from datetime import datetime, timezone
-from statistics import quantiles
+from statistics import fmean, quantiles
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from psycopg.types.json import Jsonb
 
 from eye.db import connect, state
-from eye.intervals import CADENCE, GRACE, HOUR, aligned_history
+from eye.intervals import CADENCE, DAY, GRACE, HOUR, aligned_history
 from eye.monitor import DETECTION_OP, baseline_level, baseline_readings
 
 
@@ -36,14 +36,18 @@ def make_mcp(dsn=None, *, db=None):
 
     @server.tool()
     def metric_readings(metric_id: str, start: datetime, end: datetime,
-                        scope: dict | None = None, aligned_to: datetime | None = None) -> dict[str, Any]:
+                        scope: dict | None = None, aligned_to: datetime | None = None,
+                        as_of: datetime | None = None, limit: int = 500) -> dict[str, Any]:
         """Read observations in the half-open UTC time interval, optionally at a specified time of day."""
         return {"data": read(
             """select window_start, scope, value, sample_size, details from observations
                where metric_id = %s and window_start >= %s and window_start < %s and scope = %s
                and (%s::timestamptz is null or window_start::time = %s::timestamptz::time)
-               order by window_start desc limit 500""",
-            (metric_id, start, end, Jsonb(scope or {}), aligned_to, aligned_to),
+               and (%s::timestamptz is null or
+                    coalesce((details->>'observation_snapshot')::timestamptz,
+                             window_start + interval '1 hour 15 minutes') <= %s)
+               order by window_start desc limit %s""",
+            (metric_id, start, end, Jsonb(scope or {}), aligned_to, aligned_to, as_of, as_of, max(1, min(limit, 500))),
         )[::-1]}
 
     @server.tool()
@@ -81,12 +85,17 @@ def make_mcp(dsn=None, *, db=None):
         return {"data": points}
 
     @server.tool()
-    def metric_breakdown(metric_id: str, window_start: datetime) -> dict[str, Any]:
+    def metric_breakdown(metric_id: str, window_start: datetime, as_of: datetime | None = None,
+                         scope: dict | None = None, limit: int = 250) -> dict[str, Any]:
         """Read available dimensional scopes of a metric in a closed observation window."""
         return {"data": read(
             """select scope, value, sample_size, details from observations
-               where metric_id = %s and window_start = %s order by sample_size desc limit 250""",
-            (metric_id, window_start),
+               where metric_id = %s and window_start = %s and scope @> %s
+                 and (%s::timestamptz is null or
+                      coalesce((details->>'observation_snapshot')::timestamptz,
+                               window_start + interval '1 hour 15 minutes') <= %s)
+               order by sample_size desc, scope limit %s""",
+            (metric_id, window_start, Jsonb(scope or {}), as_of, as_of, max(1, min(limit, 250))),
         )}
 
     @server.tool()
@@ -120,6 +129,47 @@ def make_mcp(dsn=None, *, db=None):
                order by e.occurred_at, e.id limit %s""",
             (start, end, Jsonb(scope or {}), cutoff, activities, activities, max(1, min(limit, 100))),
         )}
+
+    @server.tool()
+    def activity_mix(window_start: datetime, activities: list[str], scope: dict | None = None,
+                     as_of: datetime | None = None) -> dict[str, Any]:
+        """Compare scoped event counts with covered historical windows at the same UTC time and ingestion maturity."""
+        start, end, cutoff = observation_bounds(window_start, as_of)
+        baseline = read("select value from runtime where key = 'baseline_through'", (), single=True)
+        last_day = min(start - DAY, datetime.fromisoformat(baseline["value"])) if baseline else start - DAY
+        days = aligned_history(start, last_day)
+        activities = list(dict.fromkeys(activities))
+        window = end - start
+        maturity = cutoff - start
+
+        def count(first, through):
+            rows = read(
+                """select activity, count(*) as n from events
+                   where occurred_at >= %s and occurred_at < %s and ingested_at <= %s
+                     and activity = any(%s) and attrs @> %s group by activity""",
+                (first, first + window, through, activities, Jsonb(scope or {})),
+            )
+            return {row["activity"]: row["n"] for row in rows}
+
+        current = count(start, cutoff)
+        history = []
+        for date in days:
+            covered = read(
+                """select coalesce(sum(least(end_at, %s) - greatest(start_at, %s)), interval '0') as duration
+                   from windows where start_at < %s and end_at > %s""",
+                (date + window, date, date + window, date), single=True,
+            )
+            if covered["duration"] >= window:
+                history.append(count(date, date + maturity))
+        comparisons = []
+        for activity in activities:
+            values = [row.get(activity, 0) for row in history]
+            comparisons.append({"activity": activity, "observed": current.get(activity, 0),
+                                "expected": round(fmean(values), 2) if values else None,
+                                "historical_windows": len(values), "historical_counts": values})
+        return {"data": {"window_start": start, "window_end": end, "observed_through": cutoff,
+                         "ingestion_maturity_minutes": maturity.total_seconds() / 60 - window.total_seconds() / 60,
+                         "scope": scope or {}, "historical_windows": len(history), "activities": comparisons}}
 
     @server.tool()
     def company_context(window_start: datetime, as_of: datetime | None = None) -> dict[str, Any]:

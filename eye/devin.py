@@ -81,6 +81,82 @@ class DevinReasoner:
                           headers={"Authorization": f"Bearer {self.key}"}, timeout=12) as client:
             return self._session(client, label, request, deadline)
 
+    def investigate(self, system, schema, context, respond):
+        """Run up to three structured turns, passing local reads back to Devin."""
+        paths = []
+        continuations = []
+        turns = []
+        path = None
+        with httpx.Client(base_url="https://api.devin.ai",
+                          headers={"Authorization": f"Bearer {self.key}"}, timeout=15) as client:
+            def start(content):
+                request = {"title": "Eye of the System · graph investigation",
+                           "prompt": system + "\n" + content, "structured_output_schema": schema,
+                           "structured_output_required": True, "repos": [],
+                           "memory_enabled": False, "resumable": True}
+                if self.mode:
+                    request["devin_mode"] = self.mode
+                created = client.post(self.sessions, json=request)
+                created.raise_for_status()
+                paths.append(created.json()["session_id"])
+                log.info("Devin graph investigation session started")
+                return f"{self.sessions}/{quote(paths[-1], safe='')}"
+
+            try:
+                for turn in range(1, 4):
+                    content = json.dumps({"turn": turn, **context, "previous_turns": turns}, default=str)
+                    reused = False
+                    if path:
+                        followup = client.post(path + "/messages", json={"message": system + "\n" + content})
+                        if followup.status_code in {401, 403, 404, 409, 410}:
+                            log.info("Devin investigation follow-up returned HTTP %s; opening a continuation.",
+                                     followup.status_code)
+                            continuations.append(f"new session (HTTP {followup.status_code})")
+                            path = None
+                        else:
+                            followup.raise_for_status()
+                            reused = True
+                            continuations.append("same session")
+                    if not path:
+                        path = start(content)
+                    answer = self._investigation_turn(client, path, turn)
+                    if not answer and reused:
+                        continuations[-1] = "new session (no follow-up output)"
+                        path = start(content)
+                        answer = self._investigation_turn(client, path, turn)
+                    if not answer:
+                        break
+                    log.info("Devin graph investigation returned turn %s", turn)
+                    results = respond(answer, turn)
+                    if results is None:
+                        return answer, {"reasoning_provider": "devin", "reasoning_session_id": paths[-1],
+                                        "reasoning_sessions": paths, "continuations": continuations}
+                    turns.append({"request": answer, "evidence": results})
+            except (httpx.HTTPError, ValueError, KeyError) as exc:
+                log.warning("Devin graph investigation failed (%s)", type(exc).__name__)
+            finally:
+                for identifier in paths:
+                    try:
+                        client.delete(f"{self.sessions}/{quote(identifier, safe='')}")
+                    except httpx.HTTPError:
+                        log.warning("Devin graph investigation session cleanup was unavailable")
+        return {}, {}
+
+    def _investigation_turn(self, client, path, turn):
+        deadline = time.monotonic() + SESSION_TIMEOUT
+        while time.monotonic() < deadline:
+            response = client.get(path)
+            response.raise_for_status()
+            session = response.json()
+            answer = session.get("structured_output")
+            if isinstance(answer, dict) and answer.get("turn") == turn:
+                return answer
+            if session.get("status") in {"exit", "error"}:
+                return None
+            time.sleep(min(POLL_INTERVAL, max(0, deadline - time.monotonic())))
+        log.warning("Devin investigation turn %s timed out", turn)
+        return None
+
     def _session(self, client, label, request, deadline):
         session_path = None
         done = False

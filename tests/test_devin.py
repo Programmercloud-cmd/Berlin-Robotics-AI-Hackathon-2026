@@ -19,6 +19,7 @@ class DevinReasonerTest(unittest.TestCase):
                 "uncertainty": "The origin of the timeouts is unknown.",
             },
             "devin-curation": {
+                "cadence_minutes": 5,
                 "relationships": [
                     {"target": "process:payment", "kind": "measures", "reason": "Measures payment attempts."}
                 ],
@@ -53,4 +54,4 @@ class DevinReasonerTest(unittest.TestCase):
                 self.assertEqual(output, outputs[f"devin-{role}"])
                 self.assertEqual(provenance["reasoning_provider"], "devin")
                 self.assertEqual(provenance["reasoning_session_id"], f"devin-{role}")
-        self.assertEqual(requested_schemas, [set(outputs["devin-investigation"]), {"relationships"}])
+        self.assertEqual(requested_schemas, [set(outputs["devin-investigation"]), set(outputs["devin-curation"])])

@@ -130,7 +130,8 @@ def make_app(dsn, model=None):
                 ).fetchall()
             return db.execute(
                 """select * from evidence where incident_id = any(%s)
-                   order by (kind in ('incident grouping', 'branch evidence', 'first observable break', 'observed events', 'anomaly')) desc,
+                   order by (kind in ('investigation context', 'investigation read', 'investigation conclusion')) desc,
+                            (kind in ('incident grouping', 'branch evidence', 'first observable break', 'observed events', 'anomaly')) desc,
                             window_start desc, id desc limit 120""",
                 (ids,),
             ).fetchall()
