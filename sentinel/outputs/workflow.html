@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sentinel workflow</title>
+<style>
+:root{--bg:#f6f6f4;--panel:#ffffff;--soft:#f1f0ed;--line:#dedcd7;--ink:#141413;--ink2:#55534e;--muted:#8a8984;
+ --accent:#2a78d6;--accent-soft:#e7f0fb;--good:#0ca30c;--good-soft:#e5f6e5;--warn:#c98a00;--warn-soft:#fff3d6;
+ --crit:#d03b3b;--crit-soft:#fde8e8;--violet:#6250d6;--violet-soft:#efecfd;--teal:#0f8a8a;--teal-soft:#e2f4f4;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--panel:#1f1f1d;--soft:#292927;--line:#3a3a37;--ink:#f0efec;
+ --ink2:#c3c2b7;--muted:#8f8e88;--accent:#4a95ea;--accent-soft:#1d2d40;--good:#3fc23f;--good-soft:#1c2e1c;
+ --warn:#e2a92a;--warn-soft:#352b14;--crit:#ef6565;--crit-soft:#3a1d1d;--violet:#9085e9;--violet-soft:#27233f;
+ --teal:#3cb8b8;--teal-soft:#173131;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.5 "Segoe UI",system-ui,-apple-system,sans-serif}
+.wrap{max-width:1600px;margin:0 auto;padding:14px 18px 24px}
+header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px}
+header h1{font-size:18px;margin:0}header .sub{color:var(--muted)}.spacer{flex:1}
+.btn{font:inherit;font-size:12px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;
+ padding:5px 12px;cursor:pointer}.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn:disabled{opacity:.5;cursor:default}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{font:inherit;font-size:12px;border:0;background:var(--panel);color:var(--ink2);padding:5px 10px;cursor:pointer}
+.seg button.on{background:var(--soft);color:var(--ink);font-weight:600}
+.caption{display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--line);
+ border-left:4px solid var(--c,var(--accent));border-radius:12px;padding:10px 15px;margin-bottom:12px;min-height:46px}
+.caption .n{font:650 11px/1 "Segoe UI",system-ui;text-transform:uppercase;letter-spacing:.05em;color:var(--c,var(--accent));white-space:nowrap}
+.caption .t{font-size:15px;font-weight:500}
+.grid{display:grid;grid-template-columns:250px minmax(0,1fr) 290px;gap:10px}
+@media (max-width:1200px){.grid{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;min-height:0;display:flex;flex-direction:column}
+.card h2{font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--ink2);margin:0;
+ padding:10px 13px;border-bottom:1px solid var(--line)}
+.runs{overflow:auto;max-height:640px}
+.run{padding:9px 13px;border-bottom:1px solid var(--line);cursor:pointer;border-left:3px solid transparent}
+.run:hover{background:var(--soft)}.run.sel{background:var(--soft);border-left-color:var(--accent)}
+.run .h{display:flex;gap:6px;align-items:center}.run .tm{font:12px Consolas,monospace;color:var(--muted)}
+.run .ti{font-weight:600}.run .d{color:var(--ink2);font-size:12px;margin-top:2px}
+.tag{font-size:10.5px;font-weight:650;border-radius:6px;padding:1px 7px;margin-left:auto;white-space:nowrap}
+.t-p1{background:var(--crit);color:#fff}.t-p2{background:var(--warn-soft);color:var(--warn)}.t-ok{background:var(--good-soft);color:var(--good)}
+.t-hold{background:var(--teal-soft);color:var(--teal)}.t-q{background:var(--soft);color:var(--ink2)}
+.canvas{position:relative;overflow:auto}
+svg#wf{display:block;width:100%;height:auto}
+.node rect.box{fill:var(--panel);stroke:var(--line);stroke-width:1.5;transition:stroke .2s,fill .2s}
+.node text.ti{font:600 14.5px "Segoe UI",system-ui;fill:var(--ink)}
+.node text.ki{font:650 10.5px "Segoe UI",system-ui;letter-spacing:.06em;fill:var(--muted)}
+.node text.out{font:12.5px "Segoe UI",system-ui;fill:var(--ink2)}
+.node .st{font:700 12px "Segoe UI",system-ui}
+.node{cursor:pointer}
+.node.running rect.box{stroke:var(--accent);stroke-width:2.5;fill:var(--accent-soft)}
+.node.done rect.box{stroke:var(--good);stroke-width:2}
+.node.stop rect.box{stroke:var(--warn);stroke-width:2.5;fill:var(--warn-soft)}
+.node.alert rect.box{stroke:var(--crit);stroke-width:2.5;fill:var(--crit-soft)}
+.node.skipped{opacity:.38}.node.skipped rect.box{stroke-dasharray:5 4}
+.node.sel rect.box{filter:drop-shadow(0 0 6px rgba(42,120,214,.55))}
+.node.running rect.box{animation:pulse 1s ease-in-out infinite}
+@keyframes pulse{0%,100%{stroke-opacity:1}50%{stroke-opacity:.35}}
+path.edge{fill:none;stroke:var(--line);stroke-width:2}
+path.edge.on{stroke:var(--accent);stroke-width:2.5}
+path.edge.dash{stroke-dasharray:6 5}
+text.elab{font:600 10.5px "Segoe UI",system-ui;fill:var(--muted)}
+rect.group{fill:none;stroke:var(--violet);stroke-width:1.5;stroke-dasharray:7 5;rx:16}
+text.glab{font:650 11px "Segoe UI",system-ui;fill:var(--violet);letter-spacing:.05em}
+circle.token{fill:var(--accent);filter:drop-shadow(0 0 4px rgba(42,120,214,.8))}
+.detail{padding:10px 13px;overflow:auto;max-height:640px}
+.detail .k{font-size:10.5px;font-weight:650;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin-top:10px}
+.detail .v{margin-top:2px}.detail code{font:11.5px Consolas,monospace;background:var(--soft);padding:0 4px;border-radius:4px}
+.detail ul{margin:4px 0;padding-left:17px}.detail li{margin:3px 0}
+.empty{color:var(--muted)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;padding:8px 13px;border-top:1px solid var(--line);font-size:11.5px;color:var(--ink2)}
+.legend i{display:inline-block;width:14px;height:10px;border-radius:3px;border:2px solid;vertical-align:middle;margin-right:5px}
+</style></head>
+<body><div class="wrap">
+<header><h1>Sentinel</h1><span class="sub">agent workflow · every hour is one execution</span><span class="spacer"></span>
+ <button class="btn primary" id="play">▶ Play story</button><button class="btn" id="pause" disabled>❚❚ Pause</button>
+ <span class="seg" id="speed"><button data-s="0.6">0.6×</button><button data-s="1" class="on">1×</button><button data-s="1.6">1.6×</button></span>
+ <a class="btn" href="/mail" target="_blank" style="text-decoration:none">✉ Mailbox</a><a class="btn" href="/" style="text-decoration:none">Architecture view</a></header>
+<div class="caption" id="cap"><span class="n" id="cap-n">ready</span><span class="t" id="cap-t">Press “Play story”, or pick an execution on the left.</span></div>
+<div class="grid">
+ <div class="card"><h2>Executions</h2><div class="runs" id="runs"><div class="empty" style="padding:14px">loading…</div></div></div>
+ <div class="card"><h2>Workflow</h2><div class="canvas"><svg id="wf" viewBox="0 0 1050 540"></svg></div>
+  <div class="legend"><span><i style="border-color:var(--accent);background:var(--accent-soft)"></i>running</span>
+   <span><i style="border-color:var(--good)"></i>done</span><span><i style="border-color:var(--warn);background:var(--warn-soft)"></i>stopped here</span>
+   <span><i style="border-color:var(--crit);background:var(--crit-soft)"></i>alert</span><span><i style="border-color:var(--line);border-style:dashed"></i>skipped</span></div></div>
+ <div class="card"><h2>Node detail</h2><div class="detail" id="detail"><div class="empty">Click a node to see its input, output and evidence.</div></div></div>
+</div></div>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const NS="http://www.w3.org/2000/svg";
+// ---------------- the workflow (matches Agent Architecture: monitor -> bus -> investigator -> meta-agent -> outputs)
+const W=176,H=70,COL=[16,226,436,646,856];
+const NODES={
+ trigger:{x:COL[0],y:24,k:"TRIGGER",t:"Hourly tick"},
+ monitor:{x:COL[1],y:24,k:"1 · MONITOR",t:"Detect anomalies"},
+ dq:{x:COL[2],y:24,k:"GATE",t:"Data quality"},
+ innocent:{x:COL[3],y:24,k:"FILTER",t:"Innocent change?"},
+ bus:{x:COL[4],y:24,k:"2 · EVENT BUS",t:"Publish event"},
+ data:{x:COL[0],y:178,k:"3 · INVESTIGATOR",t:"Data check"},
+ riskloc:{x:COL[1],y:178,k:"INVESTIGATOR",t:"RiskLoc clues"},
+ walk:{x:COL[2],y:178,k:"INVESTIGATOR",t:"Graph walk (BFS)"},
+ localise:{x:COL[3],y:178,k:"INVESTIGATOR",t:"Localise segment"},
+ control:{x:COL[4],y:178,k:"INVESTIGATOR",t:"Control tests"},
+ hypo:{x:COL[4],y:306,k:"INVESTIGATOR",t:"Test hypotheses"},
+ mech:{x:COL[3],y:306,k:"INVESTIGATOR",t:"Failure mechanism"},
+ conclude:{x:COL[2],y:306,k:"INVESTIGATOR",t:"Conclusion"},
+ dead:{x:COL[1],y:306,k:"DECISION",t:"Dead end?"},
+ meta:{x:COL[0],y:306,k:"4 · META-AGENT",t:"Extend the graph"},
+ gate:{x:COL[1],y:452,k:"DECISION",t:"Page someone?"},
+ silent:{x:COL[2],y:452,k:"5a · SILENT",t:"Report by e-mail"},
+ live:{x:COL[3],y:452,k:"5b · LIVE",t:"Live UI"}};
+const EDGES=[["trigger","monitor"],["monitor","dq"],["dq","innocent"],["innocent","bus"],["bus","data"],["data","riskloc"],
+ ["riskloc","walk"],["walk","localise"],["localise","control"],["control","hypo"],["hypo","mech"],["mech","conclude"],
+ ["conclude","dead"],["dead","meta","yes"],["meta","localise","re-test",true],["dead","gate","no"],["gate","silent","P1"],["gate","live"]];
+const ORDER=["trigger","monitor","dq","innocent","bus","data","riskloc","walk","localise","control","hypo","mech","conclude","dead","meta","gate","silent","live"];
+function port(id,side){const n=NODES[id];return side==="r"?[n.x+W,n.y+H/2]:side==="l"?[n.x,n.y+H/2]:side==="b"?[n.x+W/2,n.y+H]:[n.x+W/2,n.y];}
+function edgePath(a,b){const A=NODES[a],B=NODES[b];
+ if(a==="bus"&&b==="data"){const [x1,y1]=port(a,"b"),[x2,y2]=port(b,"t"),y=132;return `M${x1},${y1} L${x1},${y-8} Q${x1},${y} ${x1-8},${y} L${x2+8},${y} Q${x2},${y} ${x2},${y+8} L${x2},${y2}`;}
+ if(a==="meta"&&b==="localise"){const [x1,y1]=port(a,"t"),[x2,y2]=port(b,"b"),y=276;return `M${x1},${y1} L${x1},${y+8} Q${x1},${y} ${x1+8},${y} L${x2-8},${y} Q${x2},${y} ${x2},${y-8} L${x2},${y2}`;}
+ if(Math.abs(A.y-B.y)<5){const [x1,y1]=A.x<B.x?port(a,"r"):port(a,"l"),[x2,y2]=A.x<B.x?port(b,"l"):port(b,"r");return `M${x1},${y1} L${x2},${y2}`;}
+ if(Math.abs(A.x-B.x)<5){const [x1,y1]=A.y<B.y?port(a,"b"):port(a,"t"),[x2,y2]=A.y<B.y?port(b,"t"):port(b,"b");return `M${x1},${y1} L${x2},${y2}`;}
+ if(a==="meta"&&b==="localise"){const [x1,y1]=port(a,"t");const [x2,y2]=port(b,"t");return `M${x1},${y1} C${x1},${y1-170} ${x2},${y2-60} ${x2},${y2}`;}
+ const [x1,y1]=port(a,"b"),[x2,y2]=port(b,"t"),my=(y1+y2)/2;return `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;}
+function draw(){const svg=$("#wf");svg.innerHTML=`<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker>
+ <marker id="arOn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+ <rect class="group" x="6" y="152" width="1036" height="242" rx="16"/><text class="glab" x="20" y="170">INVESTIGATOR · ReAct brain</text>`;
+ for(const [a,b,lab,dash] of EDGES){const p=document.createElementNS(NS,"path");p.setAttribute("d",edgePath(a,b));p.setAttribute("class","edge"+(dash?" dash":""));
+  p.setAttribute("marker-end","url(#ar)");p.id=`e-${a}-${b}`;svg.appendChild(p);
+  if(lab){const L=p.getPointAtLength(p.getTotalLength()*.5),t=document.createElementNS(NS,"text");
+   const vertical=Math.abs(NODES[a].x-NODES[b].x)<5;t.setAttribute("x",vertical?L.x+8:L.x);t.setAttribute("y",vertical?L.y+4:L.y-9);
+   t.setAttribute("text-anchor",vertical?"start":"middle");
+   t.setAttribute("class","elab");t.textContent=lab;svg.appendChild(t);}}
+ for(const id of ORDER){const n=NODES[id],g=document.createElementNS(NS,"g");g.setAttribute("class","node");g.id="n-"+id;
+  g.innerHTML=`<rect class="box" x="${n.x}" y="${n.y}" width="${W}" height="${H}" rx="11"/>
+  <text class="ki" x="${n.x+12}" y="${n.y+18}">${esc(n.k)}</text><text class="ti" x="${n.x+12}" y="${n.y+38}">${esc(n.t)}</text>
+  <text class="out" x="${n.x+12}" y="${n.y+58}" id="o-${id}"></text><text class="st" x="${n.x+W-14}" y="${n.y+19}" text-anchor="end" id="s-${id}"></text>`;
+  g.onclick=()=>showDetail(id);svg.appendChild(g);}}
+
+// ---------------- executions built from the recorded bus events
+let EV=[],RUNS=[],current=null,stepsDone=[],playing=false,paused=false,speed=1,sel=null;
+const clip=(t,n)=>{t=String(t??"");return t.length>n?t.slice(0,n-1)+"…":t;};
+const seg=s=>s||"all traffic";
+function fmt(v){if(v==null||isNaN(v))return"—";const a=Math.abs(v);return a>=1000?(+v).toLocaleString("en",{maximumFractionDigits:0}):a>=10?(+v).toFixed(1):(+v).toPrecision(3);}
+function buildRuns(){const runs=[];const byInc={};
+ for(const e of EV){if(e.incident_id){(byInc[e.incident_id]=byInc[e.incident_id]||[]).push(e);}}
+ const seenInn=new Set();
+ for(const e of EV){const p=e.payload||{},hh=(e.sim_ts||"").slice(11,16);
+  const key=(p.explained_by||[]).join("|");
+  if(e.type==="INNOCENT_CHANGE"&&(!seenInn.has(key)||/^sessions$|^orders$/.test(p.metric)&&!seenInn.has(key+"|"+p.metric))){seenInn.add(key);seenInn.add(key+"|"+p.metric);
+   runs.push({id:"inn-"+e.seq,ts:e.sim_ts,title:"Innocent change",kind:"ok",tag:"no alert",desc:`${p.metric} [${seg(p.segment)}]`,steps:innocentSteps(e)});}
+  if(e.type==="DATA_ISSUE"&&p.completeness<1)
+   runs.push({id:"dq-"+e.seq,ts:e.sim_ts,title:"Late data",kind:"hold",tag:"held",desc:`${p.table} ${String(p.hour).slice(11,16)} at ${Math.round(p.completeness*100)}%`,steps:dqSteps(e)});
+  if(e.type==="INCIDENT_OPENED"){const evs=byInc[e.incident_id]||[];const fr=evs.find(x=>x.type==="FINAL_REPORT"&&x.payload.kind==="alert");
+   const soft=evs.find(x=>x.type==="SOFT_ALERT");const lab=[...evs].reverse().find(x=>x.type==="INCIDENT_UPDATED"&&x.payload.label)?.payload.label;
+   runs.push({id:e.incident_id,ts:e.sim_ts,title:`${e.incident_id} · ${p.trigger?.metric}`,kind:fr?"p1":soft?"p2":"q",
+    tag:fr?"P1 paged":soft?"P2 watched":(lab||"watched"),desc:`${seg(p.trigger?.segment)} · z=${(+p.trigger?.z).toFixed(1)}`,steps:incidentSteps(e,evs)});}}
+ return runs;}
+function S(node,status,out,why,evs){return {node,status,out,why,evs:evs||[]};}
+function innocentSteps(e){const p=e.payload;return [S("trigger","done",`hour ${e.sim_ts.slice(11,16)}`,"The simulator publishes one more hour of marketplace data."),
+ S("monitor","done",`${clip(p.metric,16)} z=${(+p.z_without_plan).toFixed(1)}`,`${p.metric} [${seg(p.segment)}] moved: z=${(+p.z_without_plan).toFixed(1)} against the baseline.`,[e]),
+ S("dq","done","partitions complete","All source partitions for the hour arrived."),
+ S("innocent","stop",clip("planned: "+(p.explained_by||[]).join(", "),30),`A planned event explains it (${(p.explained_by||[]).join(", ")}); with the plan the change is z=${(+p.z_with_plan).toFixed(1)}. No incident, no alert.`,[e])];}
+function dqSteps(e){const p=e.payload;return [S("trigger","done",`hour ${String(p.hour).slice(11,16)}`,"The simulator publishes one more hour."),
+ S("monitor","done","series judged","The monitor starts judging the hour's series."),
+ S("dq","stop",`${p.table} ${Math.round(p.completeness*100)}% → held`,`${p.table} for ${String(p.hour).slice(11,16)} is only ${Math.round(p.completeness*100)}% complete: ${p.action}. Missing data is never alerted as a business change.`,[e])];}
+function incidentSteps(open,evs){const p=open.payload,t=p.trigger||{};const out=[];
+ const obs=st=>evs.filter(x=>x.type==="OBSERVATION"&&(Array.isArray(st)?st.includes(x.payload.stage):x.payload.stage===st));
+ const th=re=>evs.filter(x=>x.type==="THOUGHT"&&re.test(x.payload.text||""));
+ out.push(S("trigger","done",`hour ${String(t.ts).slice(11,16)}`,"The simulator publishes one more hour."));
+ out.push(S("monitor","done",`${clip(t.metric,18)} z=${(+t.z).toFixed(1)}`,`${t.metric} [${seg(t.segment)}]: ${fmt(t.actual)} vs ${fmt(t.expected)} expected (z=${(+t.z).toFixed(1)}, ${t.detector}).`,[open]));
+ out.push(S("dq","done","partitions complete","The data behind the alert is complete."));
+ out.push(S("innocent","done","no planned cause",(t.planned_adjustment||[]).length?`Planned adjustment: ${t.planned_adjustment.join(", ")}`:"No planned event explains the change."));
+ out.push(S("bus","done","ANOMALY_DETECTED",`The anomaly is published on the bus; the investigator opens ${open.incident_id}.`,[open]));
+ const dc=obs("data_check");out.push(S("data","done",clip(dc[0]?.payload.text||"checked",30),dc.map(x=>`${x.payload.evidence_id} ${x.payload.text}`).join("\n")||"Data checked.",dc));
+ const rl=evs.filter(x=>x.type==="OBSERVATION"&&/^riskloc/.test(x.payload.tool||x.payload.query||""));
+ out.push(rl.length?S("riskloc","done",clip(rl[0].payload.text,30),rl[0].payload.text,rl):S("riskloc","skipped","no clue",""));
+ const walk=evs.filter(x=>x.type==="GRAPH_WALK"),fc=th(/^First cause candidate/);const dec=obs(["decompose","traverse","prune"]);
+ out.push(S("walk","done",clip(fc[0]?.payload.text.replace("First cause candidate: ","first cause ")||"walked",30),
+  [...dec.map(x=>`${x.payload.evidence_id} ${x.payload.text}`),...fc.map(x=>x.payload.text)].join("\n"),[...dec,...walk]));
+ const nar=th(/^Narrow to|^Seed the investigation/),loc=obs("localise").filter(x=>!/^riskloc/.test(x.payload.tool||""));
+ const segTxt=(nar.length?nar[nar.length-1].payload.text.match(/Segment is now ([^.]+)/)?.[1]:null)||evs.filter(x=>x.type==="INCIDENT_UPDATED").slice(-1)[0]?.payload?.segment||"";
+ out.push(S("localise","done",clip(segTxt?segTxt.replace(/\|/g," · "):"localised",30),[...nar.map(x=>x.payload.text),...loc.slice(0,6).map(x=>`${x.payload.evidence_id} ${x.payload.text}`)].join("\n"),loc));
+ const ct=obs("control");out.push(ct.length?S("control","done",clip(ct.map(x=>(x.payload.text.match(/^[^:]+/)||[""])[0]+(/specific to this segment|larger here/.test(x.payload.text)?" ✓":" ✗")).join(", "),30),
+  ct.map(x=>`${x.payload.evidence_id} ${x.payload.text}`).join("\n"),ct):S("control","skipped","no segment",""));
+ const hy=evs.filter(x=>x.type==="HYPOTHESIS"),last={};for(const h of hy){last[h.payload.id]={...(last[h.payload.id]||{}),...h.payload};}
+ const H=Object.values(last);const best=H.filter(h=>h.status!=="rejected").sort((a,b)=>(b.posterior??b.prior)-(a.posterior??a.prior))[0];
+ const rej=H.filter(h=>h.status==="rejected"||(h.posterior!=null&&h.posterior<0.2));
+ out.push(H.length?S("hypo","done",clip(best?`${best.id} ${Math.round((best.posterior??best.prior)*100)}% · ${rej.length} ruled out`:"none supported",30),
+  H.map(h=>`${h.id} ${Math.round((h.posterior??h.prior)*100)}% ${h.status==="rejected"?"(rejected) ":""}${h.statement}${h.why?" — "+h.why:""}`).join("\n"),hy):S("hypo","skipped","no hypothesis",""));
+ const me=obs("predict").filter(x=>/vs .* usual|events /.test(x.payload.text));
+ out.push(me.length?S("mech","done",clip(me[0].payload.text,30),me.map(x=>`${x.payload.evidence_id} ${x.payload.text}`).join("\n"),me):S("mech","skipped","no event data",""));
+ const con=evs.filter(x=>x.type==="THOUGHT"&&x.payload.stage==="conclude");const label=(con[0]?.payload.text.match(/Conclusion: (\w+)/)||[])[1]||"";
+ out.push(S("conclude","done",label.replace("_"," ")||"concluded",con.map(x=>x.payload.text).join("\n"),con));
+ const de=evs.filter(x=>x.type==="DEAD_END"),mr=evs.filter(x=>/^META_|GRAPH_MUTATION/.test(x.type));
+ out.push(S("dead","done",de.length?"yes → meta-agent":"no",de.length?de.map(x=>(x.payload.reasons||[]).join("; ")).join("\n"):"A hypothesis reached the confidence threshold: no dead end."));
+ if(de.length)out.push(S("meta","done",clip(mr.slice(-1)[0]?.payload.text||"explored",30),mr.map(x=>x.payload.text||x.payload.summary||"").join("\n"),mr));
+ else out.push(S("meta","skipped","not needed",""));
+ const fr=evs.find(x=>x.type==="FINAL_REPORT"&&x.payload.kind==="alert"),soft=evs.find(x=>x.type==="SOFT_ALERT");
+ const upd=[...evs].reverse().find(x=>x.type==="INCIDENT_UPDATED"&&x.payload.why&&x.payload.state);
+ if(fr){out.push(S("gate","alert","yes · P1",`Business harm ${Math.round(fr.payload.impact_eur_per_h)} EUR/h with a ${fr.payload.label.replace("_"," ")}: page.`,[fr]));
+  out.push(S("silent","alert","report delivered",`${fr.payload.id}: ${fr.payload.first_cause} in ${seg(fr.payload.segment)} — the root-cause report is delivered (outbox / e-mail) and joins the end-of-run digest.`,[fr]));
+  out.push(S("live","done","streamed","Every step above was streamed to the live UI."));}
+ else{out.push(S("gate","stop",soft?"P2 · watched":"no page",soft?soft.payload.why:(upd?.payload.why||"Below the alert threshold."),soft?[soft]:upd?[upd]:[]));
+  out.push(S("silent","skipped","not paged",""));out.push(S("live","done","streamed","Visible in the live UI."));}
+ return out;}
+
+// ---------------- rendering and playback
+function reset(){for(const id of ORDER){const g=$("#n-"+id);g.setAttribute("class","node");$("#o-"+id).textContent="";$("#s-"+id).textContent="";}
+ document.querySelectorAll("path.edge").forEach(p=>{p.classList.remove("on");p.setAttribute("marker-end","url(#ar)");});
+ document.querySelectorAll("circle.token").forEach(c=>c.remove());stepsDone=[];}
+function mark(st){const g=$("#n-"+st.node);g.setAttribute("class","node "+st.status+(sel===st.node?" sel":""));
+ $("#o-"+st.node).textContent=clip(st.out||"",24);$("#s-"+st.node).textContent={done:"✓",stop:"■",alert:"!",skipped:"–",running:"…"}[st.status]||"";
+ $("#s-"+st.node).setAttribute("fill",{done:"var(--good)",stop:"var(--warn)",alert:"var(--crit)",skipped:"var(--muted)",running:"var(--accent)"}[st.status]);}
+function token(a,b,ms){return new Promise(res=>{const p=$(`#e-${a}-${b}`);if(!p){res();return;}p.classList.add("on");p.setAttribute("marker-end","url(#arOn)");
+ const c=document.createElementNS(NS,"circle");c.setAttribute("r","6");c.setAttribute("class","token");$("#wf").appendChild(c);
+ const L=p.getTotalLength();let el=0;(function f(){if(!paused)el+=16;
+  const k=Math.min(1,el/ms),pt=p.getPointAtLength(L*k);c.setAttribute("cx",pt.x);c.setAttribute("cy",pt.y);
+  if(k<1)setTimeout(f,16);else{c.remove();res();}})();});}
+const wait=ms=>new Promise(r=>{const t0=Date.now();(function f(){if(paused){setTimeout(f,100);return;}if(Date.now()-t0>=ms)r();else setTimeout(f,40);})();});
+function caption(n,t,c){$("#cap").style.setProperty("--c",c||"var(--accent)");$("#cap-n").textContent=n;$("#cap-t").textContent=t;}
+const NODECAP={trigger:"Trigger",monitor:"Monitor",dq:"Data quality",innocent:"Innocent-change filter",bus:"Event bus",data:"Investigator · data check",
+ riskloc:"Investigator · RiskLoc",walk:"Investigator · graph walk",localise:"Investigator · localise",control:"Investigator · control tests",
+ hypo:"Investigator · hypotheses",mech:"Investigator · mechanism",conclude:"Investigator · conclusion",dead:"Dead end?",meta:"Meta-agent",
+ gate:"Alert decision",silent:"Silent mode",live:"Live mode"};
+const COLORS={stop:"var(--warn)",alert:"var(--crit)",done:"var(--accent)",skipped:"var(--muted)"};
+async function playRun(run){current=run;reset();selectRun(run.id);let prev=null;
+ caption(`${run.ts.slice(11,16)} · ${run.title}`,`New execution: ${run.desc}`,"var(--ink2)");await wait(900/speed);
+ for(const st of run.steps){if(current!==run)return;
+  if(st.status!=="skipped"&&prev)await token(prev,st.node,520/speed);
+  if(current!==run)return;
+  if(st.status!=="skipped"){const g=$("#n-"+st.node);g.setAttribute("class","node running");await wait(260/speed);}
+  mark(st);stepsDone.push(st);if(st.status!=="skipped"){prev=st.node;
+   caption(NODECAP[st.node],clip((st.why||st.out||"").split("\n")[0],170),COLORS[st.status]);showDetail(st.node,true);
+   await wait((st.status==="stop"||st.status==="alert"?2300:1150)/speed);}}
+ caption(`${run.ts.slice(11,16)} · done`,run.kind==="p1"?"The incident was paged with its root cause; the report is in the outbox and the digest e-mail.":
+  run.kind==="hold"?"The hour is held back until the data is complete: no false alarm.":run.kind==="ok"?"Explained by a planned change: nothing to page.":"Investigated and kept under watch.",
+  COLORS[run.kind==="p1"?"alert":"stop"]);}
+function showDetail(id,auto){sel=id;document.querySelectorAll(".node").forEach(g=>g.classList.toggle("sel",g.id==="n-"+id));
+ const st=stepsDone.find(s=>s.node===id);const n=NODES[id];
+ if(!st){$("#detail").innerHTML=`<div class="k">${esc(n.k)}</div><div class="v"><b>${esc(n.t)}</b></div><div class="empty" style="margin-top:8px">Not reached in this execution yet.</div>`;return;}
+ const lines=(st.why||"").split("\n").filter(Boolean);
+ $("#detail").innerHTML=`<div class="k">${esc(n.k)}</div><div class="v"><b>${esc(n.t)}</b> · ${esc(st.status)}</div>
+  <div class="k">Output</div><div class="v">${esc(st.out||"—")}</div>
+  <div class="k">What happened</div><div class="v">${lines.length>1?"<ul>"+lines.slice(0,12).map(l=>`<li>${esc(l)}</li>`).join("")+"</ul>":esc(lines[0]||"—")}</div>
+  ${id==="silent"?`<div class="k">Silent mode</div><div class="v"><a href="/mail" target="_blank">Open the mailbox ↗</a> — the alert e-mail and the run digest</div>`:""}
+  ${st.evs.length?`<div class="k">Bus events</div><div class="v">${st.evs.slice(0,8).map(e=>`<code>${esc(e.type)}</code>${e.payload?.evidence_id?" "+esc(e.payload.evidence_id):""}`).join(" ")}</div>`:""}`;}
+function selectRun(id){document.querySelectorAll(".run").forEach(r=>r.classList.toggle("sel",r.dataset.id===id));}
+function renderRuns(){$("#runs").innerHTML=RUNS.map(r=>`<div class="run" data-id="${esc(r.id)}"><div class="h"><span class="tm">${esc(r.ts.slice(11,16))}</span>
+ <span class="ti">${esc(r.title)}</span><span class="tag t-${r.kind}">${esc(r.tag)}</span></div><div class="d">${esc(r.desc)}</div></div>`).join("")||`<div class="empty" style="padding:14px">no executions recorded</div>`;
+ document.querySelectorAll(".run").forEach(el=>el.onclick=()=>{playing=false;const r=RUNS.find(x=>x.id===el.dataset.id);playRun(r);});}
+async function story(){if(playing)return;playing=true;paused=false;$("#pause").disabled=false;
+ const featured=[RUNS.find(r=>r.kind==="ok"&&/^sessions /.test(r.desc))||RUNS.find(r=>r.kind==="ok"),RUNS.find(r=>r.kind==="hold"),...RUNS.filter(r=>r.kind==="p1")].filter(Boolean);
+ for(const r of featured){if(!playing)break;await playRun(r);if(current!==r)break;await wait(2200/speed);}
+ playing=false;}
+$("#play").onclick=()=>{playing=false;current=null;setTimeout(story,50);};
+$("#pause").onclick=()=>{paused=!paused;$("#pause").textContent=paused?"▶ Resume":"❚❚ Pause";};
+document.querySelectorAll("#speed button").forEach(b=>b.onclick=()=>{speed=+b.dataset.s;document.querySelectorAll("#speed button").forEach(x=>x.classList.toggle("on",x===b));});
+draw();
+fetch("/api/events").then(r=>r.json()).then(evs=>{EV=evs;RUNS=buildRuns();renderRuns();
+ if(new URLSearchParams(location.search).has("autoplay"))story();});
+</script></body></html>

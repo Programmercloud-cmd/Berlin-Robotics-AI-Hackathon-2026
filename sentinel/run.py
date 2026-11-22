@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import warnings
@@ -94,16 +95,27 @@ def main(argv=None):
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--add-metric-at", default="2026-10-26T23:00", help="when a contributor submits payment_cost_rate")
     p.add_argument("--no-meta", action="store_true")
+    p.add_argument("--demo", action="store_true",
+                   help="short demo: day one until 19:00 (campaign, late data, payment fault, red-herring release), "
+                        "about 3 minutes")
+    p.add_argument("--email-to", default=None, help="digest recipient(s), comma-separated (overrides ALERT_EMAIL_TO)")
+    p.add_argument("--email-each", action="store_true", help="also mail every alert when it happens")
     p.add_argument("--data", choices=["fake", "shoply"], default="fake",
                    help="fake: dev/fake_data.py; shoply: Chaimaa's Shoply simulator (.shoply-chaimaa checkout)")
     a = p.parse_args(argv)
+    if a.demo:                      # the short story: everything that matters on day one happens before 19:00
+        a.until, a.add_metric_at = "2026-10-26T19:00", None
+        if a.speed is None:
+            a.speed = 0.3 if a.mode == "live" else 0.0
     speed = a.speed if a.speed is not None else (1.5 if a.mode == "live" else 0.0)
+    if a.email_to:
+        os.environ["ALERT_EMAIL_TO"] = a.email_to
 
     t0 = time.time()
     print("building graph, validating it on history and fitting baselines …")
     rt = Runtime(a)
     from sentinel.outputs.silent import SilentNotifier
-    notifier = SilentNotifier(rt.bus, echo=True)
+    notifier = SilentNotifier(rt.bus, echo=True, email_each=a.email_each)
     server = None
     if a.mode == "live":
         from sentinel.outputs.live import serve
@@ -113,6 +125,7 @@ def main(argv=None):
     print(f"ready in {time.time() - t0:.0f}s; running {LIVE_START} → {a.until}")
     rt.run(pd.Timestamp(a.until), speed, pd.Timestamp(a.add_metric_at) if a.add_metric_at else None)
 
+    notifier.finish(rt, str(LIVE_START), str(pd.Timestamp(a.until)))     # silent mode: the digest e-mail
     incs = rt.incidents.incidents.values()
     print(f"\n{len(incs)} incidents, {len(notifier.delivered)} reports delivered, run took {time.time() - t0:.0f}s")
     for i in incs:

@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sentinel</title>
+<style>
+:root{--bg:#f6f6f4;--panel:#ffffff;--soft:#f1f0ed;--line:#e4e3df;--ink:#141413;--ink2:#55534e;--muted:#8a8984;
+ --accent:#2a78d6;--accent-soft:#e7f0fb;--good:#0ca30c;--good-soft:#e5f6e5;--warn:#c98a00;--warn-soft:#fff3d6;
+ --crit:#d03b3b;--crit-soft:#fde8e8;--violet:#6250d6;--violet-soft:#efecfd;--teal:#0f8a8a;--teal-soft:#e2f4f4;
+ color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--panel:#1f1f1d;--soft:#292927;--line:#353532;--ink:#f0efec;
+ --ink2:#c3c2b7;--muted:#8f8e88;--accent:#4a95ea;--accent-soft:#1d2d40;--good:#3fc23f;--good-soft:#1c2e1c;
+ --warn:#e2a92a;--warn-soft:#352b14;--crit:#ef6565;--crit-soft:#3a1d1d;--violet:#9085e9;--violet-soft:#27233f;
+ --teal:#3cb8b8;--teal-soft:#173131;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.5 "Segoe UI",system-ui,-apple-system,sans-serif}
+.wrap{max-width:1500px;margin:0 auto;padding:14px 18px 28px}
+header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:14px}
+header h1{font-size:18px;margin:0;letter-spacing:-.01em}
+header .sub{color:var(--muted)}
+.pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--panel);
+ border-radius:999px;padding:3px 11px;font-size:12px;color:var(--ink2)}
+.pill b{color:var(--ink);font-variant-numeric:tabular-nums}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--muted);display:inline-block}
+.dot.live{background:var(--good);box-shadow:0 0 0 3px var(--good-soft)}
+.spacer{flex:1}
+/* ---------- story caption ---------- */
+.story{display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--c,var(--accent));
+ border-radius:12px;padding:11px 15px;margin-bottom:12px;min-height:48px}
+.story .n{font:650 11px/1 "Segoe UI",system-ui;text-transform:uppercase;letter-spacing:.05em;color:var(--c,var(--accent));white-space:nowrap}
+.story .t{font-size:15px;font-weight:500;color:var(--ink)}
+.story .t.fade{animation:fade .45s ease-out}
+@keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+/* ---------- pipeline ---------- */
+.pipe{display:grid;grid-template-columns:1fr 18px 1.15fr 18px 1fr 18px 1.25fr 18px 1.1fr;align-items:stretch;
+ gap:0;margin-bottom:10px}
+.arrow{display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:15px}
+.stage{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:11px 13px;min-width:0;
+ transition:border-color .25s, box-shadow .25s;position:relative}
+.stage.hot{border-color:var(--c);box-shadow:0 0 0 3px var(--cs)}
+.stage .num{font-size:11px;font-weight:600;color:var(--c);letter-spacing:.04em;text-transform:uppercase}
+.stage .name{font-weight:650;font-size:14px;margin:1px 0 0}
+.stage .role{color:var(--muted);font-size:11.5px}
+.stage .big{display:flex;gap:14px;margin:8px 0 4px;flex-wrap:wrap}
+.stage .big div{font-size:11px;color:var(--ink2)}
+.stage .big b{display:block;font-size:19px;font-weight:650;color:var(--ink);font-variant-numeric:tabular-nums;line-height:1.15}
+.stage .last{font-size:11.5px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+ border-top:1px solid var(--line);padding-top:6px;margin-top:6px;min-height:24px}
+.s-data{--c:var(--teal);--cs:var(--teal-soft)}.s-mon{--c:var(--accent);--cs:var(--accent-soft)}
+.s-bus{--c:var(--ink2);--cs:var(--soft)}.s-inv{--c:var(--warn);--cs:var(--warn-soft)}
+.s-meta{--c:var(--violet);--cs:var(--violet-soft)}.s-out{--c:var(--crit);--cs:var(--crit-soft)}
+.outs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.out{border:1px solid var(--line);border-radius:9px;padding:6px 9px;font-size:11.5px;color:var(--ink2)}
+.out b{color:var(--ink);font-size:15px;font-variant-numeric:tabular-nums}
+.metaline{font-size:11.5px;color:var(--ink2);margin:-2px 0 12px;text-align:center}
+/* ---------- main ---------- */
+.main{display:grid;grid-template-columns:minmax(280px,.9fr) minmax(360px,1.25fr) minmax(380px,1.35fr);gap:10px}
+@media (max-width:1150px){.pipe{grid-template-columns:1fr}.arrow{transform:rotate(90deg);height:16px}.main{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;min-height:0}
+.card h2{font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--ink2);margin:0;
+ padding:10px 13px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+.card h2 .r{margin-left:auto;text-transform:none;letter-spacing:0;font-weight:400;color:var(--muted)}
+.scroll{overflow:auto;max-height:560px}
+.empty{color:var(--muted);padding:18px 14px}
+.inc{padding:10px 13px;border-bottom:1px solid var(--line);cursor:pointer}
+.inc:hover{background:var(--soft)}.inc.sel{background:var(--soft);box-shadow:inset 3px 0 0 var(--accent)}
+.inc .top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.inc .id{font-weight:650}.inc .t{margin-left:auto;color:var(--muted);font-size:11.5px;font-variant-numeric:tabular-nums}
+.inc .what{margin-top:3px}.inc .what code{font:12px Consolas,monospace;color:var(--ink)}
+.inc .seg{color:var(--ink2);font-size:12px}
+.badge{display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:650;border-radius:6px;padding:1px 7px;
+ background:var(--soft);color:var(--ink2)}
+.b-p1{background:var(--crit);color:#fff}.b-p2{background:var(--warn-soft);color:var(--warn)}
+.b-watch{background:var(--soft);color:var(--ink2)}.b-ok{background:var(--good-soft);color:var(--good)}
+.l-supported_cause{background:var(--crit-soft);color:var(--crit)}.l-hypothesis{background:var(--warn-soft);color:var(--warn)}
+.l-explained{background:var(--good-soft);color:var(--good)}.l-data_issue{background:var(--teal-soft);color:var(--teal)}
+.l-unexplained{background:var(--soft);color:var(--ink2)}
+/* ---------- investigation timeline ---------- */
+.tl{padding:6px 13px 12px}
+.step{display:grid;grid-template-columns:14px 1fr;gap:9px;padding:6px 0;position:relative}
+.step:before{content:"";position:absolute;left:6px;top:20px;bottom:-6px;width:2px;background:var(--line)}
+.step:last-child:before{display:none}
+.step .d{width:12px;height:12px;border-radius:50%;margin-top:3px;background:var(--panel);border:2px solid var(--c,var(--muted))}
+.step .st{font-size:10.5px;font-weight:650;text-transform:uppercase;letter-spacing:.04em;color:var(--c,var(--muted))}
+.step .tx{color:var(--ink)}.step .ev{font:11px Consolas,monospace;color:var(--muted);margin-right:5px}
+.st-data_check{--c:var(--teal)}.st-localise,.st-control{--c:var(--accent)}.st-decompose,.st-traverse,.st-prune{--c:var(--violet)}
+.st-events,.st-causal,.st-predict{--c:var(--warn)}.st-meta{--c:var(--violet)}.st-conclude{--c:var(--crit)}
+.hyps{padding:4px 13px 12px;border-top:1px solid var(--line)}
+.hyp{margin:8px 0}.hyp .h{display:flex;gap:6px;align-items:baseline}.hyp .h .p{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--ink2)}
+.bar{height:8px;border-radius:4px;background:var(--soft);position:relative;margin-top:4px;overflow:hidden}
+.bar i{position:absolute;left:0;top:0;bottom:0;border-radius:4px;background:var(--accent)}
+.bar i.prior{background:none;border-right:2px solid var(--ink2)}
+.hyp.rej .bar i{background:var(--muted)}.hyp.rej .h{color:var(--muted);text-decoration:line-through}
+/* ---------- report ---------- */
+#chart{padding:8px 13px 2px}
+#chart svg{width:100%;height:150px;display:block}
+.legend{display:flex;gap:14px;font-size:11.5px;color:var(--ink2);padding:2px 13px 8px}
+.legend i{display:inline-block;width:16px;vertical-align:middle;margin-right:5px}
+.tip{position:fixed;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;
+ padding:6px 9px;font-size:12px;box-shadow:0 4px 16px rgba(0,0,0,.12);display:none;z-index:5}
+#report{padding:6px 15px 14px;font-size:12.5px;border-top:1px solid var(--line)}
+#report h2{all:unset;display:block;font-size:15px;font-weight:650;margin:8px 0 6px}
+#report h3{font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink2);margin:14px 0 4px}
+#report ul{margin:0;padding-left:18px}#report li{margin:3px 0}#report p{margin:5px 0}
+#report code{font:11.5px Consolas,monospace;background:var(--soft);padding:0 4px;border-radius:4px}
+/* ---------- event stream ---------- */
+details.stream{margin-top:10px}
+details.stream summary{cursor:pointer;list-style:none;font-size:12px;font-weight:600;letter-spacing:.04em;
+ text-transform:uppercase;color:var(--ink2);padding:10px 13px;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+details[open].stream summary{border-radius:12px 12px 0 0}
+.feed{background:var(--panel);border:1px solid var(--line);border-top:0;border-radius:0 0 12px 12px;max-height:320px;overflow:auto}
+.fi{display:grid;grid-template-columns:88px 100px 1fr;gap:10px;padding:5px 13px;border-bottom:1px solid var(--line);font-size:12px}
+.fi .t{font:11px Consolas,monospace;color:var(--muted)}.fi .k{font-size:11px;font-weight:600;color:var(--c,var(--ink2))}
+.fi .x{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chips{display:inline-flex;gap:6px;margin-left:10px;text-transform:none;letter-spacing:0}
+.chips button{font:inherit;font-size:11px;font-weight:500;border:1px solid var(--line);background:var(--soft);color:var(--ink2);
+ border-radius:999px;padding:1px 9px;cursor:pointer}.chips button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+</style></head>
+<body><div class="wrap">
+<header>
+  <h1>Sentinel</h1><span class="sub">agentic marketplace monitoring</span>
+  <span class="spacer"></span>
+  <span class="pill"><span class="dot" id="live-dot"></span><span id="status">connecting…</span></span>
+  <span class="pill">simulated time <b id="clock">—</b></span>
+  <a class="pill" id="mail-pill" href="/mail" target="_blank" style="text-decoration:none;cursor:pointer">✉ silent mode <b id="mail">—</b> · open mailbox</a>
+  <a class="pill" href="/workflow" target="_blank" style="text-decoration:none">workflow view</a>
+</header>
+
+<div class="story" id="story"><span class="n" id="story-n">waiting</span><span class="t" id="story-t">The agent starts watching the marketplace.</span></div>
+
+<div class="pipe" id="pipe">
+  <div class="stage s-data" id="st-data"><div class="num">Data</div><div class="name">Simulator stream</div>
+    <div class="role">normal hours, injected faults</div>
+    <div class="big"><div><b id="c-hours">0</b>hours</div><div><b id="c-dq">0</b>data issues</div></div>
+    <div class="last" id="l-data">waiting for the first hour</div></div>
+  <div class="arrow">→</div>
+  <div class="stage s-mon" id="st-mon"><div class="num">1 · Monitor engine</div><div class="name">the eyes</div>
+    <div class="role">baselines, anomaly detection, innocent-change filter</div>
+    <div class="big"><div><b id="c-series">0</b>series-hours</div><div><b id="c-anom">0</b>anomalies</div><div><b id="c-inno">0</b>innocent</div></div>
+    <div class="last" id="l-mon">—</div></div>
+  <div class="arrow">→</div>
+  <div class="stage s-bus" id="st-bus"><div class="num">2 · Event bus</div><div class="name">the nervous system</div>
+    <div class="role">every state change is broadcast</div>
+    <div class="big"><div><b id="c-ev">0</b>events</div><div><b id="c-types">0</b>types</div></div>
+    <div class="last" id="l-bus">—</div></div>
+  <div class="arrow">⇄</div>
+  <div class="stage s-inv" id="st-inv"><div class="num">3 · Investigator</div><div class="name">the brain</div>
+    <div class="role">graph walk, drill-down, hypothesis tests, report</div>
+    <div class="big"><div><b id="c-inc">0</b>incidents</div><div><b id="c-steps">0</b>tool calls</div><div><b id="c-hyp">0</b>hypotheses</div></div>
+    <div class="last" id="l-inv">—</div></div>
+  <div class="arrow">⇄</div>
+  <div class="stage s-meta" id="st-meta"><div class="num">4 · Meta-agent</div><div class="name">the creativity</div>
+    <div class="role">new metrics and dimensions at dead ends</div>
+    <div class="big"><div><b id="c-dead">0</b>dead ends</div><div><b id="c-mut">0</b>graph changes</div></div>
+    <div class="last" id="l-meta">—</div></div>
+</div>
+<div class="metaline">↓ the bus feeds two outputs ↓</div>
+<div class="pipe" style="grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+  <div class="stage s-out" id="st-silent" style="cursor:pointer" onclick="window.open('/mail','_blank')" title="Open the mailbox"><div class="num">5a · Silent mode <span style="float:right;text-transform:none;letter-spacing:0">open mailbox ↗</span></div><div class="name">reports by e-mail</div>
+    <div class="role">only FINAL_REPORT; a digest when the run ends</div>
+    <div class="big"><div><b id="c-alert">0</b>alerts paged</div><div><b id="c-soft">0</b>P2 watched</div><div><b id="c-mail">0</b>e-mails sent</div></div>
+    <div class="last" id="l-silent">—</div></div>
+  <div class="stage s-mon" id="st-live"><div class="num">5b · Live mode</div><div class="name">this page</div>
+    <div class="role">server-sent events, replayed from the start</div>
+    <div class="big"><div><b id="c-streamed">0</b>events streamed</div><div><b id="c-lat">—</b>last update</div></div>
+    <div class="last" id="l-live">—</div></div>
+</div>
+
+<div class="main">
+  <div class="card"><h2>Incidents <span class="r" id="inc-note"></span></h2><div class="scroll" id="incs"><div class="empty">No incident yet.</div></div></div>
+  <div class="card"><h2>Investigation <span class="r" id="inv-note">select an incident</span></h2>
+    <div class="scroll"><div class="tl" id="tl"><div class="empty">The agent's reasoning for the selected incident appears here, step by step.</div></div>
+    <div class="hyps" id="hyps" hidden></div></div></div>
+  <div class="card"><h2>Report <span class="r" id="rep-note"></span></h2>
+    <div id="chart"></div><div class="legend" id="legend" hidden>
+      <span><i style="border-top:2px solid var(--accent)"></i>actual</span>
+      <span><i style="border-top:2px dashed var(--ink2)"></i>expected</span>
+      <span><i style="height:8px;background:var(--accent-soft)"></i>normal band</span></div>
+    <div class="scroll" id="report"><div class="empty">The root-cause report of the selected incident.</div></div></div>
+</div>
+
+<details class="stream"><summary>Event stream <span class="chips" id="chips">
+  <button data-f="all" class="on">all</button><button data-f="mon">monitor</button><button data-f="inv">investigator</button>
+  <button data-f="meta">meta-agent</button><button data-f="out">outputs</button></span></summary>
+  <div class="feed" id="feed"></div></details>
+</div>
+<div class="tip" id="tip"></div>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const STAGE={data:new Set(["DATA_ISSUE","MONITOR_TICK"]),
+ mon:new Set(["ANOMALY_DETECTED","INNOCENT_CHANGE","WATCH","SCAN","EARLY_WARNING","LOCALISATION_CLUE","PROCESS_DEVIATION",
+  "DATA_PROFILE","BASELINE_LEARNED","PLANNED_EFFECT_ENDED","SERIES_RECOVERED"]),
+ inv:new Set(["INCIDENT_OPENED","THOUGHT","ACTION","OBSERVATION","HYPOTHESIS","GRAPH_WALK","INCIDENT_UPDATED","INCIDENT_RESOLVED",
+  "SOFT_ALERT","PROBLEM_FRAME"]),
+ meta:new Set(["DEAD_END","META_PROPOSAL","META_RESULT","GRAPH_MUTATION"]),
+ out:new Set(["FINAL_REPORT","NOTIFY"])};
+const COLOR={data:"var(--teal)",mon:"var(--accent)",inv:"var(--warn)",meta:"var(--violet)",out:"var(--crit)",bus:"var(--ink2)"};
+const LABEL={supported_cause:"supported cause",hypothesis:"likely cause",explained:"explained",data_issue:"data issue",unexplained:"unexplained"};
+const N={hours:0,dq:0,series:0,anom:0,inno:0,ev:0,inc:0,steps:0,hyp:0,dead:0,mut:0,alert:0,soft:0,mail:0};
+const types=new Set(), events=[], soft=new Set(), alerted=new Set();
+let selected=null, filter="all", lastAt=null;
+
+function stageOf(e){if(e.type==="SYSTEM"&&/world:|new event/.test(e.payload?.message||""))return"data";
+ for(const k in STAGE)if(STAGE[k].has(e.type))return k;return"bus";}
+function set(id,v){const el=document.getElementById(id);if(el)el.textContent=typeof v==="number"?v.toLocaleString("en"):v;}
+const hotTimers={};function hot(id){const el=document.getElementById(id);if(!el)return;el.classList.add("hot");
+ clearTimeout(hotTimers[id]);hotTimers[id]=setTimeout(()=>el.classList.remove("hot"),1100);}
+function short(e){const p=e.payload||{};
+ switch(e.type){
+  case"ANOMALY_DETECTED":return `${p.metric} [${p.segment||"total"}] ${fmt(p.actual)} vs ${fmt(p.expected)} (z=${(+p.z).toFixed(1)})`;
+  case"EARLY_WARNING":return `early warning: ${p.metric} [${p.segment||"total"}] z=${(+p.z).toFixed(1)}`;
+  case"INNOCENT_CHANGE":return `${p.metric} [${p.segment||"total"}] explained by ${(p.explained_by||[]).join(", ")}`;
+  case"MONITOR_TICK":return `${p.hours_evaluated} series-hours judged, ${p.anomalies} anomalies`;
+  case"DATA_ISSUE":return `${p.table} ${String(p.hour).slice(5,16)}: ${p.action}`;
+  case"INCIDENT_OPENED":return `${e.incident_id} opened: ${p.trigger?.metric} [${p.trigger?.segment||"total"}]`;
+  case"THOUGHT":return p.text;case"OBSERVATION":return `${p.evidence_id} ${p.text}`;
+  case"ACTION":return p.tool;case"HYPOTHESIS":return p.prediction?`${p.id}: ${p.prediction} → ${p.result}`:`${p.id}: ${p.statement}`;
+  case"GRAPH_WALK":return `walked ${p.visited?.length||0} node(s), pruned ${p.pruned?.length||0}; chain ${(p.chain||[]).join(" ← ")}`;
+  case"INCIDENT_UPDATED":return `${e.incident_id} ${p.state||""} ${p.why||p.attached||""}`;
+  case"SOFT_ALERT":return `${e.incident_id} kept as P2: ${p.why}`;
+  case"DEAD_END":return `dead end on ${p.focus}: ${(p.reasons||[])[0]||""}`;
+  case"META_PROPOSAL":case"META_RESULT":return p.text||p.summary||JSON.stringify(p).slice(0,120);
+  case"GRAPH_MUTATION":return p.summary||`${p.op||"change"} ${p.id||p.edge||""}`;
+  case"FINAL_REPORT":return `${p.kind} ${p.id}: ${LABEL[p.label]||p.label} · ${p.first_cause} [${p.segment||"total"}]`;
+  case"NOTIFY":return p.what==="error"?`${p.channel} failed: ${p.error}`:`${p.what}: ${p.title||p.id} → ${(p.channels||[]).join(", ")}${p.to?" ("+p.to+")":""}`;
+  case"SYSTEM":return p.message;case"SCAN":return `scan: ${p.cells_tested} cells, ${p.significant} significant`;
+  case"LOCALISATION_CLUE":return `RiskLoc on ${p.metric}: ${(p.causes||[]).map(c=>Object.entries(c.segment).map(x=>x.join("=")).join("|")).join("; ")||"no localised cause"}`;
+  default:return p.text||p.message||p.summary||"";}}
+function clip(t,n=150){t=String(t??"");if(t.length<=n)return t;const cut=t.slice(0,n);const i=Math.max(cut.lastIndexOf("; "),cut.lastIndexOf(", "));return (i>60?cut.slice(0,i):cut)+" …";}
+function fmt(v){if(v==null||isNaN(v))return"—";const a=Math.abs(v);return a>=1000?(+v).toLocaleString("en",{maximumFractionDigits:0}):a>=10?(+v).toFixed(1):(+v).toPrecision(3);}
+
+// ---------- story captions: one plain sentence per key moment, each shown for at least 2.4 s
+const storyQ=[];let storyBusy=false,storyN=0,tickSeen=0;const seenCap=new Set();
+function narrate(e){const p=e.payload||{},seg=s=>s||"all traffic";
+ switch(e.type){
+  case"MONITOR_TICK":if(++tickSeen===1)return["Monitor","Every hour the monitor judges each watched series against its seasonal baseline (local hour, weekday)."];return null;
+  case"INNOCENT_CHANGE":return["Innocent change",`${p.metric} [${seg(p.segment)}] moved, but a planned campaign explains it: no alert.`];
+  case"DATA_ISSUE":return p.completeness<1?["Data quality",`${p.table} for ${String(p.hour).slice(11,16)} is incomplete: the hour is held back instead of alerting on missing data.`]
+   :["Data quality",`${p.table} for ${String(p.hour).slice(11,16)} is complete again and judged now.`];
+  case"ANOMALY_DETECTED":return Math.abs(+p.z)>=7&&(p.impact_eur_per_h||0)<-100?["Monitor · anomaly",`${p.metric} [${seg(p.segment)}] ${fmt(p.actual)} vs ${fmt(p.expected)} expected (z=${(+p.z).toFixed(1)}): an ANOMALY_DETECTED event goes on the bus.`]:null;
+  case"LOCALISATION_CLUE":return (p.causes||[]).length?["RiskLoc",`The drop concentrates in ${(p.causes||[]).map(c=>Object.entries(c.segment).map(x=>x.join("=")).join(" · ")).join(" and ")}.`]:null;
+  case"INCIDENT_OPENED":return (p.trigger?.impact_eur_per_h||0)<-100?["Investigator",`${e.incident_id} opened: the ReAct brain starts its investigation of ${p.trigger?.metric}.`]:null;
+  case"THOUGHT":if(/^Narrow to/.test(p.text||""))return["Investigator · localise",p.text];
+   if(/^First cause candidate/.test(p.text||""))return["Investigator · decompose",p.text];
+   if(p.stage==="conclude"&&/supported_cause/.test(p.text||""))return["Conclusion",p.text.replace(/^Conclusion: /,"")];return null;
+  case"HYPOTHESIS":if(p.status==="rejected")return["Hypothesis rejected",`${p.statement} — ${p.why}`];
+   if(p.result==="confirmed"&&+p.posterior>=0.8)return["Hypothesis supported",`${p.statement} (${Math.round(p.posterior*100)}%)`];return null;
+  case"FINAL_REPORT":return p.kind==="alert"?["Silent mode · P1 alert",`${p.id}: ${LABEL[p.label]||p.label}, first cause ${p.first_cause} in ${seg(p.segment)} — the report is delivered.`]:null;
+  case"NOTIFY":return p.what==="digest"?["Silent mode · digest",`Run summary written${(p.channels||[]).includes("email")?" and e-mailed to "+p.to:""}: ${p.alerts} alert(s), ${p.incidents} incident(s).`]:null;
+  default:return null;}}
+function story(e){const c=narrate(e);if(!c)return;const key=c[0]+c[1];if(seenCap.has(key))return;seenCap.add(key);
+ const st=stageOf(e);storyQ.push([c[0],c[1],COLOR[st]]);if(!storyBusy)nextStory();}
+function nextStory(){const c=storyQ.shift();if(!c){storyBusy=false;return;}storyBusy=true;storyN++;
+ const box=$("#story");box.style.setProperty("--c",c[2]);set("story-n",`${storyN} · ${c[0]}`);
+ const t=$("#story-t");t.textContent=c[1];t.classList.remove("fade");void t.offsetWidth;t.classList.add("fade");
+ setTimeout(nextStory,storyQ.length>4?1400:2400);}
+
+function onEvent(e){events.push(e);story(e);types.add(e.type);N.ev++;lastAt=Date.now();
+ const st=stageOf(e),p=e.payload||{};
+ if(e.sim_ts)set("clock",e.sim_ts.slice(0,16));
+ if(st==="data"){hot("st-data");if(e.type==="MONITOR_TICK"){N.hours++;N.series+=p.hours_evaluated||0;}if(e.type==="DATA_ISSUE"&&p.completeness<1)N.dq++;
+  set("l-data",short(e));if(e.type==="MONITOR_TICK"){hot("st-mon");set("l-mon",short(e));}}
+ if(st==="mon"){hot("st-mon");if(e.type==="ANOMALY_DETECTED")N.anom++;if(e.type==="INNOCENT_CHANGE")N.inno++;set("l-mon",short(e));}
+ if(st==="inv"){hot("st-inv");if(e.type==="INCIDENT_OPENED")N.inc++;if(e.type==="ACTION")N.steps++;
+  if(e.type==="HYPOTHESIS"&&!p.prediction)N.hyp++;if(e.type==="SOFT_ALERT"){soft.add(e.incident_id);N.soft=soft.size;}
+  set("l-inv",short(e));}
+ if(st==="meta"){hot("st-meta");if(e.type==="DEAD_END")N.dead++;if(e.type==="GRAPH_MUTATION")N.mut++;set("l-meta",short(e));}
+ if(st==="out"){hot("st-silent");if(e.type==="FINAL_REPORT"&&p.kind==="alert"){alerted.add(p.id);N.alert=alerted.size;soft.delete(p.id);N.soft=soft.size;}
+  if(e.type==="NOTIFY"&&(p.channels||[]).includes("email"))N.mail++;set("l-silent",short(e));}
+ hot("st-bus");set("l-bus",`${e.type.toLowerCase().replace(/_/g," ")} · ${e.source}`);
+ for(const k in N)set("c-"+k,N[k]);set("c-types",types.size);set("c-streamed",N.ev);set("l-live",short(e));
+ if(e.type==="INCIDENT_OPENED"||e.type==="FINAL_REPORT"||e.type==="INCIDENT_UPDATED"||e.type==="SOFT_ALERT"||e.type==="INCIDENT_RESOLVED")soon(loadIncs);
+ if(selected&&e.incident_id===selected)soon(renderSelected);
+ if(document.querySelector("details.stream").open)soon(renderFeed);}
+
+const pend={};function soon(f){if(pend[f.name])return;pend[f.name]=1;setTimeout(()=>{pend[f.name]=0;f();},300);}
+let incs=[];
+async function loadIncs(){try{incs=await (await fetch("/api/incidents")).json();}catch(_){return;}
+ const order={alerted:0,reopened:0,investigating:1,monitoring:2,detected:2,resolved:3};
+ incs.sort((a,b)=>(order[a.state]??4)-(order[b.state]??4)||b.opened_at.localeCompare(a.opened_at));
+ set("inc-note",`${incs.length} · ${N.alert} paged`);
+ $("#incs").innerHTML=incs.length?incs.map(card).join(""):`<div class="empty">No incident yet.</div>`;
+ document.querySelectorAll(".inc").forEach(el=>el.onclick=()=>{selected=el.dataset.id;loadIncs();renderSelected();});
+ if(!selected){const first=incs.find(i=>alerted.has(i.id))||incs[0];if(first){selected=first.id;renderSelected();}}}
+function level(i){if(alerted.has(i.id))return`<span class="badge b-p1">P1 paged</span>`;if(soft.has(i.id))return`<span class="badge b-p2">P2 watched</span>`;
+ if(i.state==="resolved")return`<span class="badge b-ok">resolved</span>`;return`<span class="badge b-watch">${esc(i.state)}</span>`;}
+function card(i){const imp=i.impact_eur_total?`${i.impact_eur_total>0?"+":""}${Math.round(i.impact_eur_total).toLocaleString("en")} EUR`:"";
+ return `<div class="inc ${i.id===selected?"sel":""}" data-id="${esc(i.id)}"><div class="top"><span class="id">${esc(i.id)}</span>${level(i)}
+ ${i.label?`<span class="badge l-${i.label}">${esc(LABEL[i.label]||i.label)}</span>`:""}<span class="t">${esc(String(i.opened_at).slice(5,16).replace("T"," "))}</span></div>
+ <div class="what">first cause <code>${esc(i.first_cause||"…")}</code></div>
+ <div class="seg">${esc(i.segment||"all traffic")}${imp?` · ${imp}`:""}</div></div>`;}
+
+function renderSelected(){const inc=incs.find(i=>i.id===selected);if(!inc)return;
+ const evs=events.filter(e=>e.incident_id===selected);
+ set("inv-note",`${inc.id} · ${evs.filter(e=>e.type==="ACTION").length} tool calls`);
+ const steps=[];
+ for(const e of evs){const p=e.payload||{};
+  if(e.type==="INCIDENT_OPENED")steps.push({st:"data_check",lab:"alert",tx:`${p.trigger?.metric} [${p.trigger?.segment||"total"}] ${fmt(p.trigger?.actual)} vs ${fmt(p.trigger?.expected)} (z=${(+p.trigger?.z).toFixed(1)})`});
+  else if(e.type==="OBSERVATION")steps.push({st:p.stage||"observe",lab:(p.stage||"").replace("_"," "),ev:p.evidence_id,tx:p.text});
+  else if(e.type==="THOUGHT"&&["decompose","localise","control","conclude"].includes(p.stage)&&/First cause|Narrow|Generalise|Conclusion|No input/.test(p.text||""))
+   steps.push({st:p.stage,lab:p.stage==="conclude"?"conclusion":p.stage,tx:p.text});
+  else if(e.type==="DEAD_END")steps.push({st:"meta",lab:"dead end",tx:(p.reasons||[]).join("; ")});}
+ $("#tl").innerHTML=steps.length?steps.slice(-40).map(s=>`<div class="step st-${esc(s.st)}"><span class="d"></span><div>
+  <div class="st">${esc(s.lab)}</div><div class="tx" title="${esc(s.tx)}">${s.ev?`<span class="ev">${esc(s.ev)}</span>`:""}${esc(clip(s.tx))}</div></div></div>`).join("")
+  :`<div class="empty">investigating…</div>`;
+ const H=inc.hypotheses||[];$("#hyps").hidden=!H.length;
+ $("#hyps").innerHTML=H.length?`<div style="font-size:11.5px;color:var(--ink2);margin:8px 0 2px">Hypotheses · prior <span style="display:inline-block;width:10px;border-right:2px solid var(--ink2);height:9px;vertical-align:middle"></span> → posterior</div>`+
+  H.map(h=>`<div class="hyp ${h.status==="rejected"?"rej":""}"><div class="h"><b>${esc(h.id)}</b><span>${esc(h.statement)}</span>
+   <span class="p">${Math.round(h.posterior*100)}%</span></div><div class="bar"><i style="width:${Math.max(1,h.posterior*100)}%"></i>
+   <i class="prior" style="width:${h.prior*100}%"></i></div></div>`).join(""):"";
+ set("rep-note",inc.label?LABEL[inc.label]||inc.label:"");
+ $("#report").innerHTML=inc.report_md?md(inc.report_md):`<div class="empty">investigating…</div>`;
+ const trig=evs.find(e=>e.type==="INCIDENT_OPENED");if(trig)loadChart(trig.payload.trigger.metric,trig.payload.trigger.segment||"");}
+
+function md(s){return s.split("\n").map(l=>{let h=esc(l).replace(/\*\*(.+?)\*\*/g,"<b>$1</b>").replace(/`(.+?)`/g,"<code>$1</code>");
+ if(l.startsWith("## "))return`<h2>${h.slice(3)}</h2>`;if(l.startsWith("### "))return`<h3>${h.slice(4)}</h3>`;
+ if(/^\s+- /.test(l))return`<ul style="margin-left:14px"><li>${h.replace(/^\s+- /,"")}</li></ul>`;
+ if(l.startsWith("- "))return`<ul><li>${h.slice(2)}</li></ul>`;return l.trim()?`<p>${h}</p>`:"";}).join("").replace(/<\/ul><ul>/g,"");}
+
+async function loadChart(metric,segment){let rows=[];try{rows=await (await fetch(`/api/series?metric=${encodeURIComponent(metric)}&segment=${encodeURIComponent(segment)}`)).json();}catch(_){}
+ const box=$("#chart");if(!rows.length){box.innerHTML=`<div class="empty" style="padding:6px 0">${esc(metric)} [${esc(segment||"total")}]: no hourly series at this grain</div>`;$("#legend").hidden=true;return;}
+ $("#legend").hidden=false;const W=box.clientWidth-26||520,H=150,pad={l:44,r:8,t:12,b:22};
+ const xs=rows.map((_,i)=>i),vals=rows.flatMap(r=>[r.actual,r.expected,r.low,r.high]).filter(v=>v!=null&&isFinite(v));
+ let lo=Math.min(...vals),hi=Math.max(...vals);if(hi===lo){hi+=1;lo-=1;}const sp=hi-lo;lo-=sp*.08;hi+=sp*.08;
+ const X=i=>pad.l+i*(W-pad.l-pad.r)/Math.max(1,rows.length-1),Y=v=>pad.t+(hi-v)*(H-pad.t-pad.b)/(hi-lo);
+ const band=rows.map((r,i)=>`${X(i)},${Y(r.high??r.expected)}`).join(" ")+" "+rows.map((r,i)=>`${X(i)},${Y(r.low??r.expected)}`).reverse().join(" ");
+ const line=k=>rows.map((r,i)=>`${i?"L":"M"}${X(i).toFixed(1)},${Y(r[k]).toFixed(1)}`).join("");
+ const ticks=[lo+sp*.08,(lo+hi)/2,hi-sp*.08];
+ box.innerHTML=`<div style="font-size:11.5px;color:var(--ink2)">${esc(metric)} · ${esc(segment||"all traffic")} · hourly</div>
+ <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" id="svgc">
+ ${ticks.map(t=>`<line x1="${pad.l}" x2="${W-pad.r}" y1="${Y(t)}" y2="${Y(t)}" stroke="var(--line)"/><text x="${pad.l-6}" y="${Y(t)+3}" text-anchor="end" font-size="10" fill="var(--muted)">${fmt(t)}</text>`).join("")}
+ <polygon points="${band}" fill="var(--accent-soft)"/>
+ <path d="${line("expected")}" fill="none" stroke="var(--ink2)" stroke-width="1.5" stroke-dasharray="4 3"/>
+ <path d="${line("actual")}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>
+ ${rows.map((r,i)=>Math.abs(r.z)>=4.5?`<circle cx="${X(i)}" cy="${Y(r.actual)}" r="4" fill="var(--crit)" stroke="var(--panel)" stroke-width="2"/>`:"").join("")}
+ <text x="${pad.l}" y="${H-6}" font-size="10" fill="var(--muted)">${esc(String(rows[0].ts).slice(5,13))}</text>
+ <text x="${W-pad.r}" y="${H-6}" font-size="10" fill="var(--muted)" text-anchor="end">${esc(String(rows[rows.length-1].ts).slice(5,13))}</text>
+ <line id="xh" y1="${pad.t}" y2="${H-pad.b}" stroke="var(--muted)" stroke-width="1" visibility="hidden"/>
+ <rect x="${pad.l}" y="0" width="${W-pad.l-pad.r}" height="${H}" fill="transparent" id="hit"/></svg>`;
+ const tip=$("#tip"),hit=$("#hit"),xh=$("#xh");
+ hit.onmousemove=ev=>{const r=hit.getBoundingClientRect(),i=Math.round((ev.clientX-r.left)/r.width*(rows.length-1));const row=rows[Math.max(0,Math.min(rows.length-1,i))];
+  xh.setAttribute("x1",X(i));xh.setAttribute("x2",X(i));xh.setAttribute("visibility","visible");
+  tip.style.display="block";tip.style.left=(ev.clientX+14)+"px";tip.style.top=(ev.clientY-10)+"px";
+  tip.innerHTML=`<div style="color:var(--muted)">${esc(String(row.ts).slice(0,16))}</div>actual <b>${fmt(row.actual)}</b><br>expected ${fmt(row.expected)}<br>z ${(+row.z).toFixed(1)}`;};
+ hit.onmouseleave=()=>{tip.style.display="none";xh.setAttribute("visibility","hidden");};}
+
+function renderFeed(){const keep=e=>filter==="all"||stageOf(e)===filter;
+ $("#feed").innerHTML=events.filter(keep).slice(-300).reverse().map(e=>{const st=stageOf(e);
+  return `<div class="fi"><span class="t">${esc((e.sim_ts||"").slice(5,16))}</span><span class="k" style="--c:${COLOR[st]}">${esc(e.type.toLowerCase().replace(/_/g," "))}</span><span class="x" title="${esc(short(e))}">${e.incident_id?`<b>${esc(e.incident_id)}</b> `:""}${esc(short(e))}</span></div>`;}).join("");}
+document.querySelectorAll("#chips button").forEach(b=>b.onclick=ev=>{ev.preventDefault();filter=b.dataset.f;
+ document.querySelectorAll("#chips button").forEach(x=>x.classList.toggle("on",x===b));renderFeed();});
+document.querySelector("details.stream").addEventListener("toggle",renderFeed);
+
+async function runStatus(){try{const r=await (await fetch("/api/run")).json();
+ set("mail",r.email.configured?`e-mail on → ${r.email.to}`:"preview");}catch(_){}}
+setInterval(()=>{if(lastAt)set("c-lat",`${Math.round((Date.now()-lastAt)/1000)}s ago`);},1000);
+const es=new EventSource("/api/stream");
+es.onopen=()=>{set("status","live");$("#live-dot").classList.add("live");};
+es.onmessage=m=>onEvent(JSON.parse(m.data));
+es.addEventListener("done",()=>{set("status","run finished");$("#live-dot").classList.remove("live");loadIncs();es.close();});
+es.onerror=()=>{if(!events.length)set("status","reconnecting…");};
+runStatus();loadIncs();
+</script></body></html>

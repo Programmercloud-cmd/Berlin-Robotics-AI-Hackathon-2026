@@ -1,6 +1,8 @@
 """5b. Live mode: FastAPI server pushing the bus over Server-Sent Events to a single-page UI.
 
-  GET /                 the live page (chain of thought, dynamic graph, incidents, reports)
+  GET /                 the agent page: architecture pipeline lighting up live, incidents, investigation, report
+  GET /classic          the earlier dense dashboard (chain of thought, dynamic graph)
+  GET /api/run          run status: simulated clock, finished, silent-mode e-mail configuration (masked)
   GET /api/stream       SSE: every bus event, replayed from ?since=<seq>
   GET /api/graph        current graph (nodes + edges with status), changes when the meta-agent mutates it
   GET /api/incidents    incidents with state, label, report
@@ -15,7 +17,8 @@ from pathlib import Path
 
 from sentinel.bus import EventBus
 
-PAGE = Path(__file__).with_name("live.html")
+PAGE = Path(__file__).with_name("ui.html")
+CLASSIC = Path(__file__).with_name("live.html")
 
 
 def create_app(bus: EventBus, runtime):
@@ -27,6 +30,35 @@ def create_app(bus: EventBus, runtime):
     @app.get("/", response_class=HTMLResponse)
     def index():
         return PAGE.read_text(encoding="utf-8")
+
+    @app.get("/workflow", response_class=HTMLResponse)
+    def workflow_page():
+        return Path(__file__).with_name("workflow.html").read_text(encoding="utf-8")
+
+    @app.get("/api/events")
+    def all_events():
+        return JSONResponse([json.loads(e.to_json()) for e in bus.history])
+
+    @app.get("/mail", response_class=HTMLResponse)
+    def mail_page():
+        return Path(__file__).with_name("mail.html").read_text(encoding="utf-8")
+
+    @app.get("/api/outbox")
+    def outbox():
+        from sentinel.outputs.silent import email_configured, masked_recipients, read_outbox
+        return JSONResponse({"mails": read_outbox(getattr(runtime, "outbox", "outbox")),
+                             "email": {"configured": email_configured(), "to": masked_recipients()},
+                             "finished": bool(runtime.finished)})
+
+    @app.get("/classic", response_class=HTMLResponse)
+    def classic():
+        return CLASSIC.read_text(encoding="utf-8")
+
+    @app.get("/api/run")
+    def run_status():
+        from sentinel.outputs.silent import email_configured, masked_recipients
+        return JSONResponse({"sim_ts": bus.sim_ts, "finished": bool(runtime.finished), "events": len(bus.history),
+                             "email": {"configured": email_configured(), "to": masked_recipients()}})
 
     @app.get("/api/stream")
     async def stream(since: int = 0):
