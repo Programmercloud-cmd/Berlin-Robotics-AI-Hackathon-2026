@@ -3,43 +3,55 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Eye of the System · Replay walkthrough</title>
+  <meta name="theme-color" content="#121110">
+  <title>Eye of the System · Devin investigation replay</title>
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
   <header class="bar">
     <div class="shell header-row">
-      <span class="brand"><span class="eye-mark" aria-hidden="true"></span> Eye of the System</span>
-      <a href="http://127.0.0.1:8012/" target="_blank" rel="noopener">Rehearsal Lab ↗</a>
+      <a class="brand" href="/#telemetry"><span class="eye-mark" aria-hidden="true"></span>Eye of the System</a>
+      <a class="header-link" id="dashboard-link" target="_blank" rel="noopener" hidden>Replay dashboard <span aria-hidden="true">↗</span></a>
     </div>
   </header>
   <main class="shell">
-    <div class="intro">
-      <p class="context">Seed 42 · Germany · Mobile · Stripe</p>
-      <h1>Follow a payment timeout</h1>
-      <p id="replay-status" class="replay-status" role="status">Connecting to the Test Lab and Eye…</p>
-    </div>
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="signal-dot" aria-hidden="true"></span> Devin-led investigation</p>
+        <h1 id="hero-title">Payment <span>timeout.</span></h1>
+        <p class="context" id="replay-status" role="status">Loading replay…</p>
+      </div>
+      <div class="signal-art" aria-hidden="true">
+        <div class="signal-grid"></div>
+        <div class="orbital">
+          <i class="orbit orbit-outer"></i><i class="orbit orbit-mid"></i><i class="orbit orbit-inner"></i>
+          <i class="orbit-sweep"></i><i class="orbital-eye"></i>
+          <i class="orbit-point point-a"></i><i class="orbit-point point-b"></i><i class="orbit-point point-c"></i>
+        </div>
+      </div>
+    </section>
     <nav class="pipeline" aria-label="Replay pipeline">
       <ol>
-        <li><a href="#telemetry">Telemetry</a></li>
-        <li><a href="#discovery">Discovery and graph</a></li>
-        <li><a href="#detection">Independent detection</a></li>
-        <li><a href="#registration">Live metric registration</a></li>
-        <li><a href="#recovery">Investigation and recovery</a></li>
+        <li><a href="#telemetry"><span class="pipeline-node" aria-hidden="true"></span><span>Telemetry</span></a></li>
+        <li><a href="#discovery"><span class="pipeline-node" aria-hidden="true"></span><span>Discovery</span></a></li>
+        <li><a href="#registration"><span class="pipeline-node" aria-hidden="true"></span><span>Metric registration</span></a></li>
+        <li><a href="#detection"><span class="pipeline-node" aria-hidden="true"></span><span>Detection</span></a></li>
+        <li><a href="#recovery"><span class="pipeline-node" aria-hidden="true"></span><span>Investigation &amp; recovery</span></a></li>
       </ol>
     </nav>
     <article class="stop" id="stop" aria-labelledby="stop-title">
-      <h2 id="stop-title" tabindex="-1">Telemetry</h2>
-      <p id="stop-summary"></p>
-      <p id="stop-guidance" class="guidance"></p>
+      <div class="stop-copy">
+        <p class="eyebrow" id="position"></p>
+        <h2 id="stop-title" tabindex="-1">Telemetry</h2>
+        <p id="stop-summary" class="summary"></p>
+        <div id="links" class="links"></div>
+      </div>
       <div id="facts" class="facts" hidden></div>
-      <div id="links" class="links"></div>
     </article>
     <nav class="controls" aria-label="Walkthrough steps">
       <a id="previous" hidden>← Previous</a>
-      <span id="position"></span>
-      <a id="next">Next →</a>
+      <a id="next" hidden>Next →</a>
     </nav>
   </main>
 </body>
