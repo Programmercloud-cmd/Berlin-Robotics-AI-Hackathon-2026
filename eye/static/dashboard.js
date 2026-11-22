@@ -890,6 +890,11 @@ async function refresh() {
     const response = await fetch(stateURL, { cache: "no-store" });
     if (!response.ok) throw new Error(response.status);
     snapshot = await response.json();
+    if (snapshot.company_name) {
+      const title = snapshot.company_name + " monitoring";
+      document.querySelector(".app-bar-title").textContent = title;
+      document.title = "Eye of the System · " + title;
+    }
     byId("status-dot").classList.add("connected");
     byId("status").textContent = snapshot.last_window ? "Monitoring" : "Waiting for baseline";
     byId("window").textContent = snapshot.last_window ? date(snapshot.last_window) + " UTC" : "—";

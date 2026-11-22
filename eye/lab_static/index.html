@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/static/lab.css">
   <script defer src="/static/workflow.js"></script>
   <script defer src="/static/lab.js"></script>
+  <script defer src="/static/support.js"></script>
 </head>
 <body>
   <header class="app-bar">
@@ -26,6 +27,11 @@
     </div>
   </header>
   <main class="shell">
+    <div class="company-tabs" role="tablist" aria-label="Companies">
+      <button type="button" role="tab" id="company-marketplace" aria-selected="true" aria-controls="marketplace-workspace">Marketplace</button>
+      <button type="button" role="tab" id="company-support" aria-selected="false" aria-controls="support-workspace" tabindex="-1">Support Tickets</button>
+    </div>
+    <div id="marketplace-workspace" role="tabpanel" aria-labelledby="company-marketplace">
     <p class="connection" role="status"><span class="status-dot" id="status-dot"></span><span id="status">Connecting to the simulator.</span></p>
     <section class="panel workflow" aria-labelledby="workflow">
       <div class="workflow-heading">
@@ -76,6 +82,51 @@
         <section class="panel" aria-labelledby="results">
           <h2 id="results">Run timeline</h2>
           <div id="runs"><p>Applied scenarios and generated windows appear here.</p></div>
+        </section>
+      </div>
+    </div>
+    </div>
+    <div id="support-workspace" role="tabpanel" aria-labelledby="company-support" hidden>
+      <div class="support-context">
+        <p class="connection" role="status"><span class="status-dot" id="support-status-dot"></span><span id="support-status">Connecting to the support simulator.</span></p>
+        <a id="support-eye" href="http://127.0.0.1:8004/" hidden>Open Support Eye</a>
+      </div>
+      <section class="panel" aria-labelledby="support-workflow-title">
+        <div class="workflow-heading">
+          <h2 id="support-workflow-title">Simulator ground truth</h2>
+          <span id="support-effect" class="workflow-status" hidden></span>
+        </div>
+        <div class="flow-scroll" tabindex="0" role="region" aria-label="Support ticket workflow map">
+          <div id="support-map" class="flow-map support-map">
+            <div class="flow-node support-received" data-step="received"><strong>Ticket received</strong></div>
+            <div class="flow-node flow-cohort support-queues"><strong>Queue assignment</strong><small>Standard or specialist</small></div>
+            <div class="flow-node flow-gate support-eligible"><strong>Eligible for resolution?</strong><small>Ineligible tickets leave this flow</small></div>
+            <div class="flow-node flow-authorization support-resolved" data-step="resolved"><strong>Ticket resolved</strong></div>
+            <div class="flow-node flow-outcome support-retry" data-step="retry"><strong>Retry scheduled</strong><small>Resolution still pending</small></div>
+          </div>
+        </div>
+      </section>
+      <div class="workbench">
+        <section class="panel" aria-labelledby="support-cases-title">
+          <h2 id="support-cases-title">Support cases</h2>
+          <p id="support-clock">Waiting for the baseline.</p>
+          <div class="inline">
+            <button type="button" data-support-preview="intake-surge" disabled>Preview healthy intake surge</button>
+            <button type="button" data-support-preview="specialist-regression" disabled>Preview specialist regression</button>
+          </div>
+          <section id="support-preview" class="plan-preview" aria-labelledby="support-preview-title" hidden>
+            <h3 id="support-preview-title">Scenario preview</h3>
+            <div id="support-plan"></div>
+            <div class="inline">
+              <button type="button" id="support-apply">Apply to upcoming windows</button>
+              <button type="button" id="support-close-preview" class="secondary">Close preview</button>
+            </div>
+          </section>
+          <p id="support-error" role="alert" hidden></p>
+        </section>
+        <section class="panel" aria-labelledby="support-results-title">
+          <h2 id="support-results-title">Run timeline</h2>
+          <div id="support-runs"><p>Applied support cases appear here.</p></div>
         </section>
       </div>
     </div>

@@ -30,6 +30,7 @@ from eye.simulator import HOUR, traffic_cycle
 
 log = logging.getLogger(__name__)
 EYE_URL = "http://127.0.0.1:8000/"
+postgres_lifecycle = Lock()
 
 
 def port_open(port):
@@ -46,10 +47,18 @@ def local_action(request: Request):
 def stop_process(process):
     if process and process.poll() is None:
         process.send_signal(signal.SIGINT)
-        process.wait(timeout=12)
+        try:
+            process.wait(timeout=12)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
 
 class Lab:
+    publisher = "eye.lab_simulator"
+    eye_environment = {}
+    evaluate_run = staticmethod(evaluate)
+
     def __init__(self, devin, eye_port=8000):
         self.devin = devin
         self.eye_port = eye_port
@@ -71,9 +80,11 @@ class Lab:
 
             if port_open(self.eye_port):
                 raise RuntimeError(f"Port {self.eye_port} is in use. Stop the existing Eye dashboard first.")
-            print("EYE_STARTUP postgres", flush=True)
+            self.progress("postgres")
             with TemporaryDirectory(prefix="eye-lab-") as directory:
-                postgres = get_server(Path(directory) / "data")
+                # pgserver uses a process-wide lock for its local PostgreSQL installation.
+                with postgres_lifecycle:
+                    postgres = get_server(Path(directory) / "data")
                 try:
                     self.run_processes(postgres.get_uri())
                 finally:
@@ -83,31 +94,38 @@ class Lab:
                         try:
                             stop_process(self.eye)
                         finally:
-                            postgres.cleanup()
+                            with postgres_lifecycle:
+                                postgres.cleanup()
         except Exception as exc:
             if not self.stop.is_set():
                 log.exception("Test lab could not continue")
                 with self.lock:
                     self.phase = "failed"
                     self.error = str(exc) if type(exc) is RuntimeError else "See the launcher terminal for details."
-                print("EYE_STARTUP failed", flush=True)
+                self.progress("failed")
+
+    def progress(self, phase):
+        print(f"EYE_STARTUP {phase}", flush=True)
+
+    def configure_eye(self):
+        pass
 
     def run_processes(self, dsn):
         with connect(dsn) as db:
             setup(db)
         if self.stop.is_set():
             return
-        judge_env = {**os.environ, "DATABASE_URL": dsn}
+        judge_env = {**os.environ, "DATABASE_URL": dsn, **self.eye_environment}
         simulator_env = {key: value for key, value in judge_env.items()
                          if key not in {"DEVIN_API_KEY", "DEVIN_ORG_ID", "MODEL_API_KEY", "OPENAI_API_KEY"}}
         with self.lock:
             self.dsn = dsn
             self.phase = "baseline"
             self.simulator = subprocess.Popen(
-                [sys.executable, "-m", "eye.lab_simulator"], env=simulator_env, text=True,
+                [sys.executable, "-m", self.publisher], env=simulator_env, text=True,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             )
-        print("EYE_STARTUP baseline", flush=True)
+        self.progress("baseline")
         with self.simulator.stdout as output:
             line = output.readline()
             if self.stop.is_set():
@@ -119,7 +137,7 @@ class Lab:
                 self.eye = subprocess.Popen(
                     [sys.executable, "-m", "eye", "serve", "--port", str(self.eye_port)], env=judge_env,
                 )
-            print("EYE_STARTUP discovery", flush=True)
+            self.progress("discovery")
             deadline = time.monotonic() + 180
             while not self.stop.is_set():
                 if self.eye.poll() is not None or time.monotonic() >= deadline:
@@ -131,9 +149,12 @@ class Lab:
                 self.stop.wait(0.3)
             if self.stop.is_set():
                 return
+            self.configure_eye()
+            if self.stop.is_set():
+                return
             with self.lock:
                 self.phase = "ready"
-            print("EYE_STARTUP dashboard", flush=True)
+            self.progress("dashboard")
             for line in output:
                 self.receive(json.loads(line))
         if not self.stop.is_set():
@@ -144,6 +165,9 @@ class Lab:
         with self.lock:
             simulator = self.simulator
         stop_process(simulator)
+        # A company may still be registering a metric through its Eye process.
+        if self.phase == "registration":
+            stop_process(self.eye)
         boot.join(timeout=15)
 
     def receive(self, message):
@@ -281,7 +305,7 @@ class Lab:
                 checked = datetime.fromisoformat(value) if value else None
                 for run in runs:
                     if run["scenario"] and run.get("start_at"):
-                        run["evaluation"] = evaluate(db, run, checked)
+                        run["evaluation"] = self.evaluate_run(db, run, checked)
             upcoming = last + HOUR
             result.update(eye_url=f"http://127.0.0.1:{self.eye_port}/", next_window=upcoming,
                           pattern_day=traffic_cycle(upcoming)[1] + 1, eye_through=checked)
@@ -309,17 +333,22 @@ class BenchmarkRequest(BaseModel):
     description: str = Field(default="", max_length=240)
 
 
-def make_lab_app(eye_port=8000):
+def make_lab_app(eye_port=8000, support_port=8004):
+    from eye.support_lab import SupportLab
+
     lab = Lab(configured_devin(), eye_port)
+    support = SupportLab(lab.devin, support_port)
 
     @asynccontextmanager
     async def lifespan(app):
-        boot = Thread(target=lab.boot, daemon=True)
-        boot.start()
+        workers = [(company, Thread(target=company.boot, daemon=True)) for company in (lab, support)]
+        for _, worker in workers:
+            worker.start()
         try:
             yield
         finally:
-            lab.close(boot)
+            for company, worker in workers:
+                company.close(worker)
 
     app = FastAPI(title="Eye Test Lab", lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
@@ -381,6 +410,14 @@ def make_lab_app(eye_port=8000):
     @app.get("/api/lab")
     def snapshot():
         return lab.snapshot()
+
+    @app.get("/api/support")
+    def support_snapshot():
+        return support.snapshot()
+
+    @app.post("/api/support/cases/{case}", status_code=202, dependencies=[Depends(local_action)])
+    def support_case(case: str):
+        return {"id": support.queue_case(case)}
 
     @app.get("/api/runs/{identifier}/workflow")
     def run_workflow(identifier: str):

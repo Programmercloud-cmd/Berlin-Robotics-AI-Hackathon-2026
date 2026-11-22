@@ -34,7 +34,10 @@ def main():
     parser = argparse.ArgumentParser(prog="python -m eye")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("operator", help="open the test lab launcher on port 8001")
-    commands.add_parser("lab", help="run the test lab and its local simulator on port 8002")
+    lab = commands.add_parser("lab", help="run the Test Lab and both local simulators")
+    lab.add_argument("--port", type=int, default=8002)
+    lab.add_argument("--eye-port", type=int, default=8000)
+    lab.add_argument("--support-port", type=int, default=8004)
     initialize = commands.add_parser("init", help="seed baseline and discover the marketplace")
     initialize.add_argument("--search", action="store_true", help=argparse.SUPPRESS)
     simulate = commands.add_parser("simulate", help="emit committed marketplace windows")
@@ -71,7 +74,9 @@ def main():
     if args.command == "lab":
         from eye.lab import make_lab_app
 
-        uvicorn.run(make_lab_app(), host="127.0.0.1", port=8002, access_log=False)
+        if len({args.port, args.eye_port, args.support_port}) != 3:
+            parser.error("Choose separate ports for the Lab and the two Eye dashboards.")
+        uvicorn.run(make_lab_app(args.eye_port, args.support_port), host="127.0.0.1", port=args.port, access_log=False)
         return
     if args.command == "check":
         try:

@@ -76,18 +76,27 @@ def workflow_readings(db, run):
     return readings
 
 
-def evaluate(db, run, checked_through):
+def evaluate(db, run, checked_through, *, metric=None, scope=None, include_tail=False):
     start, end = (datetime.fromisoformat(run[key]) for key in ("start_at", "end_at"))
+    before_end = "a.window_start < %s" if include_tail else "coalesce(a.window_end, a.window_start + interval '1 hour') <= %s"
+    params = [start, end]
+    if metric:
+        before_end += " and a.metric_id = %s"
+        params.append(metric)
+    if scope:
+        before_end += " and a.scope @> %s"
+        params.append(Jsonb(scope))
     alert = db.execute(
-        """select a.id, a.window_start, a.window_end, a.observed_at, a.detected_at, a.scope, a.metric_id,
+        f"""select a.id, a.window_start, a.window_end, a.observed_at, a.detected_at, a.scope, a.metric_id,
                   m.name as metric_name
            from anomalies a join metrics m on m.id = a.metric_id
            where coalesce(a.window_end, a.window_start + interval '1 hour') > %s
-             and coalesce(a.window_end, a.window_start + interval '1 hour') <= %s
+             and {before_end}
            order by a.window_start, a.detected_at, a.id limit 1""",
-        (start, end),
+        tuple(params),
     ).fetchone()
-    result = {"windows_checked": checked_through is not None and checked_through >= end - HOUR}
+    cutoff = end if include_tail else end - HOUR
+    result = {"windows_checked": checked_through is not None and checked_through >= cutoff}
     if not alert:
         return result
 

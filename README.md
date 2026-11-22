@@ -15,9 +15,21 @@ python -m eye operator
 
 Open the [operator panel on port 8001](http://127.0.0.1:8001) and click **Start test lab**. The panel opens before PostgreSQL starts and shows baseline and discovery progress. Open the [test lab on port 8002](http://127.0.0.1:8002) to create a scenario. The [Eye dashboard on port 8000](http://127.0.0.1:8000) becomes available after discovery.
 
-Run `python -m eye lab` to open the lab directly when ports 8000 and 8002 are free. Each lab session uses a temporary local PostgreSQL database and a separate simulator process. The first startup saves the seed-42 history under `.runtime/seasonality/`. Later startups restore that baseline into a fresh database. Ctrl+C stops the session.
+Run `python -m eye lab` to open the lab directly. The Marketplace dashboard uses port 8000, the Lab uses 8002, and Support Eye uses 8004. Each company runs its own simulator process, PostgreSQL instance, and Eye dashboard. The first marketplace startup saves the seed-42 history under `.runtime/seasonality/`. Later startups restore that baseline into a fresh database. Ctrl+C stops the session.
 
 On systems where Python's `ensurepip` is unavailable, create the environment with `python3 -m venv --without-pip .venv` and install with `python3 -m pip --python .venv/bin/python install -r requirements-local.txt`.
+
+### Two-company demo
+
+With Devin configured in `.env`, start the Lab with the shared investigation policy for both companies.
+
+```sh
+EYE_INVESTIGATION=generic EYE_MODEL=devin DEVIN_MODE=lite python -m eye lab
+```
+
+Open the [Marketplace tab](http://127.0.0.1:8002/) or the [Support Tickets tab](http://127.0.0.1:8002/?company=support). In **Support Tickets**, preview and apply the healthy intake surge, then the specialist regression. The regression includes a healthy high-volume lead-in and three recovery hours. **Preview replay** reviews the same case settings before publishing at the next virtual time. Use **Open Support Eye** or **Open incident** to follow Devin's saved queries from the report. Support registers its resolution metric through Eye's metric registration endpoint. The formula attaches to discovered activities during registration, and real Devin investigates any breach.
+
+To rehearse alongside a running marketplace demo, pass `--port 8066 --eye-port 8065 --support-port 8067` to the same command. The operator continues to use 8001.
 
 ## Metric catalog
 

@@ -107,16 +107,20 @@ def read_commands(commands):
     commands.put(None)
 
 
-def main():
-    reply(event="baseline", history=seed_lab(os.environ["DATABASE_URL"], LAB_SEED))
+def serve_commands(run):
     commands = Queue()
     Thread(target=read_commands, args=(commands,), daemon=True).start()
     while (job := commands.get()) is not None:
         command, controls = job
         try:
-            generate(command, controls)
+            run(command, controls)
         except Exception as exc:
             reply(id=command["id"], event="error", error=type(exc).__name__)
+
+
+def main():
+    reply(event="baseline", history=seed_lab(os.environ["DATABASE_URL"], LAB_SEED))
+    serve_commands(generate)
 
 
 if __name__ == "__main__":

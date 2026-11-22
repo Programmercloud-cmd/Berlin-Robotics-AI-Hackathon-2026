@@ -4,10 +4,7 @@ import argparse
 import json
 import logging
 import os
-from collections import Counter
-from datetime import datetime, timedelta
 from pathlib import Path
-from random import Random
 from threading import Event, Thread
 from tempfile import mkdtemp
 from time import monotonic
@@ -19,61 +16,18 @@ from psycopg.types.json import Jsonb
 
 from eye import runtime, simulator
 from eye.db import connect, set_state, setup, state
-from eye.ingestion import publish_window
 from eye.intervals import DAY, HOUR
 from eye.metric_catalog import CATALOG
 from eye.model import configured_model
-from eye.scenario import Scenario
+from eye.scenario import LAB_SEED, Scenario
+from eye.support_fixture import INTAKE_DEFINITION, RESOLUTION, RESOLUTION_DEFINITION, TICKET_SCOPE, support_events
 from eye.web import make_app
 
 log = logging.getLogger(__name__)
-SEED = 42
+SEED = LAB_SEED
 START = simulator.DEMO_START
 PAYMENT = "payment_success_rate"
-RESOLUTION = "support_ticket_resolution_rate"
 PAYMENT_SCOPE = {"country": "DE", "platform": "mobile", "payment_provider": "Stripe"}
-TICKET_SCOPE = {"queue": "specialist"}
-RESOLUTION_DEFINITION = {
-    "id": RESOLUTION, "name": "Resolution per eligible ticket",
-    "definition": "Share of resolution-eligible support tickets resolved in the current observation window.",
-    "calculation": {"op": "ratio", "activity": "support_ticket_resolved",
-                    "denominator_activity": "support_ticket_resolution_eligible"},
-    "access": {"source": "support event stream", "unit": "ratio"},
-    "direction": "down", "cadence_minutes": 5, "dimensions": ["queue"],
-}
-INTAKE_DEFINITION = {
-    "id": "support_ticket_intake", "name": "Ticket intake", "definition": "Tickets received by each support queue.",
-    "calculation": {"op": "count", "activity": "support_ticket_received"},
-    "access": {"source": "support event stream", "unit": "count"},
-    "direction": "none", "cadence_minutes": 5, "dimensions": ["queue"],
-}
-
-
-def support_events(db, start, *, volume=1.0, regression=False):
-    rng = Random(f"{SEED}:{start.isoformat()}:tickets")
-    objects, events, links, manifest = [], [], [], Counter()
-    for i in range(round(volume * (320 + rng.randrange(-9, 10)))):
-        ticket = f"ticket:{int(start.timestamp())}:{i}"
-        queue = "specialist" if rng.random() < .47 else "standard"
-        minute = start + timedelta(minutes=rng.randrange(60))
-        attrs = {"source_id": "support", "queue": queue, "ticket_id": ticket}
-        objects.append((ticket, "support_ticket", Jsonb(attrs)))
-        stages = [("received", {})]
-        if rng.random() < .92:
-            stages.append(("resolution_eligible", {}))
-            rate = .29 if regression and queue == "specialist" else .90
-            if rng.random() < rate:
-                stages.append(("resolved", {"result": "resolved"}))
-            else:
-                stages.append(("retry_scheduled", {"result": "retry_required"}))
-        for index, (stage, extra) in enumerate(stages):
-            activity, identifier = "support_ticket_" + stage, ticket + ":" + stage
-            timestamp = minute + timedelta(seconds=3 * index)
-            events.append((identifier, activity, timestamp, timestamp + timedelta(seconds=2), start,
-                           Jsonb({**attrs, **extra})))
-            links.append((identifier, ticket, "support ticket"))
-            manifest[minute, "support", activity] += 1
-    publish_window(db, start, objects, events, links, manifest)
 
 
 def observe_until(dsn, check, seconds, stop):

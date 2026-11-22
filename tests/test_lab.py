@@ -10,6 +10,9 @@ from eye import simulator
 from eye.db import connect, setup
 from eye.lab_results import evaluate, workflow_readings
 from eye.scenario import Scenario
+from eye.support_fixture import support_events
+from eye.support_lab import evaluate_support
+from eye.support_lab_simulator import CASES
 
 try:
     from pgserver import get_server
@@ -25,6 +28,36 @@ COMPLETION_LOSS = {"effect": "reduce_completions", "severity": 0.65, "duration_h
 
 
 class TestLab(unittest.TestCase):
+    @unittest.skipUnless(get_server, "Install requirements-local.txt for PostgreSQL tests.")
+    def test_support_cases_report_outcomes_and_wait_for_overlapping_checks(self):
+        with TemporaryDirectory(prefix="eye-support-lab-") as directory:
+            server = get_server(directory + "/data")
+            try:
+                with connect(server.get_uri()) as db:
+                    setup(db)
+                    start = simulator.DEMO_START
+                    measured = {}
+                    for index, (case, plan) in enumerate(CASES.items()):
+                        beginning = start + index * simulator.HOUR
+                        end = beginning + simulator.HOUR
+                        support_events(db, beginning, volume=plan["volume"], regression=plan["regression"], staged=True)
+                        run = {"scenario": plan, "start_at": beginning.isoformat(), "end_at": end.isoformat(),
+                               "published": plan["lead_in_hours"] + 1}
+                        before = evaluate_support(db, run, beginning)
+                        self.assertFalse(before["windows_checked"])
+                        self.assertFalse(before["outcomes"])
+                        simulator.publish_through(db, beginning, end + simulator.GRACE)
+                        after = evaluate_support(db, run, end)
+                        self.assertTrue(after["windows_checked"])
+                        measured[case] = {row["queue"]: row for row in after["outcomes"]}
+                    healthy = measured["intake-surge"]["specialist"]
+                    sick = measured["specialist-regression"]["specialist"]
+                    self.assertGreater(healthy["resolved"] / healthy["eligible"], .85)
+                    self.assertLess(sick["resolved"] / sick["eligible"], .40)
+                    self.assertGreater(sick["retries"], healthy["retries"])
+            finally:
+                server.cleanup()
+
     def test_normal_cycle_repeats_and_scenario_rejects_invalid_controls(self):
         start = simulator.DEMO_START
         self.assertEqual(simulator.traffic_cycle(start), simulator.traffic_cycle(start + timedelta(weeks=4)))

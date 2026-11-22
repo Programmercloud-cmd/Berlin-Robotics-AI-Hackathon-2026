@@ -16,6 +16,7 @@ from eye.metric_catalog import CATALOG, LEGACY
 from eye.metric_readings import BERLIN, Facts, MAX_MATURITY, metric_readings
 from eye.metric_insights import DETECTION_OP, history as metric_history
 from eye.metric_policy import Cadence
+from eye.monitor import interval_readings
 from eye.observation import make_mcp
 from eye.report_assembly import assemble_report
 
@@ -67,6 +68,7 @@ def make_app(dsn, model=None):
                 "select * from graph_edges order by source, target, kind"
             ).fetchall()
             payload = {
+                "company_name": (state(db, "instrumentation") or {}).get("name"),
                 "last_window": state(db, "last_window"),
                 "baseline_through": state(db, "baseline_through"),
                 "planned_events": db.execute("""select distinct on (series) * from planned_events
@@ -150,24 +152,28 @@ def make_app(dsn, model=None):
     @app.get("/api/catalog")
     def catalog():
         with connect(dsn) as db:
+            instrumented = (state(db, "instrumentation") or {}).get("catalog") == "none"
             rows = db.execute(
-                """select m.id, m.direction, m.access->'cadence_minutes' as cadence_minutes,
+                """select m.*, m.access->'cadence_minutes' as cadence_minutes,
                           latest.value, latest.details, latest.window_start
                    from metrics m left join lateral (
                        select value, details, window_start from observations o
                        where o.metric_id = m.id and o.scope = '{}' order by window_start desc limit 1
-                   ) latest on true where m.id = any(%s)""",
-                (list(CATALOG),),
+                   ) latest on true where %s or m.id = any(%s) order by m.id""",
+                (instrumented, list(CATALOG)),
             ).fetchall()
         registry = {row["id"]: row for row in rows}
+        definitions = registry if instrumented else CATALOG
         entries = []
-        for identifier, definition in CATALOG.items():
+        for identifier, definition in definitions.items():
             row = registry.get(identifier)
             entries.append({
                 **definition, "legacy_ids": [old for old, current in LEGACY.items() if current == identifier],
                 "registered": row is not None, "readings_available": bool(row and row["value"] is not None),
                 "cadence_minutes": (row or {}).get("cadence_minutes") or definition["access"]["cadence_minutes"],
-                "alerts_enabled": bool(row and row["direction"] != "none"), "latest": row,
+                "alerts_enabled": bool(row and row["direction"] != "none"),
+                "latest": ({key: row[key] for key in ("id", "direction", "cadence_minutes", "value", "details", "window_start")}
+                           if row else None),
             })
         return entries
 
@@ -208,17 +214,18 @@ def make_app(dsn, model=None):
     def catalog_readings(metric_id: str, start: datetime | None = None, end: datetime | None = None,
                          as_of: datetime | None = None, scope: str = "{}",
                          bucket_minutes: int = Query(5, ge=1)):
-        definition = CATALOG.get(metric_id)
-        if not definition:
-            raise HTTPException(404, "Unknown catalog metric.")
         try:
             filters = json.loads(scope)
-            if not isinstance(filters, dict) or not set(filters).issubset(definition["dimensions"]):
-                raise ValueError("Scope must use the metric's declared dimensions.")
-            if not all(isinstance(value, str) for value in filters.values()):
-                raise ValueError("Dimension filters must be strings.")
             with connect(dsn) as db:
-                if not db.execute("select 1 from metrics where id = %s", (metric_id,)).fetchone():
+                registered = db.execute("select * from metrics where id = %s", (metric_id,)).fetchone()
+                definition = CATALOG.get(metric_id) or registered
+                if not definition:
+                    raise HTTPException(404, "Unknown metric.")
+                if not isinstance(filters, dict) or not set(filters).issubset(definition["dimensions"]):
+                    raise ValueError("Scope must use the metric's declared dimensions.")
+                if not all(isinstance(value, str) for value in filters.values()):
+                    raise ValueError("Dimension filters must be strings.")
+                if not registered:
                     raise HTTPException(409, "This metric is awaiting registration.")
                 latest = db.execute("select * from windows order by start_at desc limit 1").fetchone()
                 if not latest:
@@ -231,14 +238,19 @@ def make_app(dsn, model=None):
                     as_of = min(as_of, available)
                 if start >= end or any(t.second or t.microsecond for t in (start, end)):
                     raise ValueError("Use a positive interval with minute-aligned boundaries.")
-                if (definition["calculation"]["method"] == "budget" and
+                if (definition["calculation"].get("method") == "budget" and
                     start.astimezone(BERLIN).date() != (end - timedelta(microseconds=1)).astimezone(BERLIN).date()):
                     raise ValueError("Daily budget utilization supports one Berlin business day per request.")
                 results = []
                 while start < end:
                     boundary = min(start + timedelta(minutes=bucket_minutes), end)
                     facts = Facts(db, start, boundary, as_of)
-                    _, value, size, details = next(metric_readings(definition, facts, scope=filters))
+                    if definition["calculation"]["op"] == "catalog":
+                        _, value, size, details = next(metric_readings(definition, facts, scope=filters))
+                    else:
+                        value, size, details = next(((value, size, details) for segment, value, size, details
+                                                     in interval_readings(definition, facts) if dict(segment) == filters),
+                                                    (None, 0, {}))
                     results.append({"window_start": start, "scope": filters, "value": value,
                                     "sample_size": size, "details": details})
                     start = boundary
@@ -247,9 +259,9 @@ def make_app(dsn, model=None):
         return {"metric_id": metric_id, "readings": results}
 
     @app.post("/api/metrics")
-    def register_metric(metric: MetricRegistration):
+    def register_metric(metric: MetricRegistration, use_model: bool = True):
         try:
-            return runtime.register(dsn, metric.model_dump(), model)
+            return runtime.register(dsn, metric.model_dump(), model if use_model else None)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
