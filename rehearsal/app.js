@@ -1,5 +1,5 @@
-const EYE = "http://127.0.0.1:8000";
-const LAB = "http://127.0.0.1:8002";
+const EYE = "http://127.0.0.1:8010";
+const LAB = "http://127.0.0.1:8012";
 const percent = new Intl.NumberFormat("en", { style: "percent", maximumFractionDigits: 1 });
 const clock = new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", hour: "2-digit", minute: "2-digit" });
 const when = new Intl.DateTimeFormat("en-GB", {
@@ -40,7 +40,7 @@ const steps = [
         }
       }
       if (data && !data.run) {
-        notes.push(line("Fresh startup", "Start the Lab from the operator panel, download the plan, import it with Review saved scenario, and apply it once Eye is ready."));
+        notes.push(line("Fresh startup", "Download the plan, import it in the rehearsal Lab with Review saved scenario, and apply it once Eye is ready."));
       }
       return notes;
     }
@@ -246,7 +246,7 @@ function render(focus = false) {
       (incident ? ` · Eye incident #${incident.id}` : " · waiting for a matching payment incident") :
       run ? "Stripe replay queued in the Test Lab." :
       snapshot.lab_status === "ready" ? "Apply the seeded replay in the Test Lab to populate the walkthrough." :
-      "Waiting for the Test Lab. Open the operator panel to check startup.";
+      "Waiting for the rehearsal Test Lab on port 8012.";
     if (status.textContent !== message) status.textContent = message;
   }
   if (focus) title.focus({ preventScroll: true });

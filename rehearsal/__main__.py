@@ -9,8 +9,10 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 
 HERE = Path(__file__).resolve().parent
-EYE = "http://127.0.0.1:8000"
-LAB = "http://127.0.0.1:8002"
+EYE_PORT = 8010
+LAB_PORT = 8012
+EYE = f"http://127.0.0.1:{EYE_PORT}"
+LAB = f"http://127.0.0.1:{LAB_PORT}"
 PLAN = json.loads((HERE / "stripe-timeout.json").read_text())
 SCOPE = {"country": "DE", "platform": "mobile", "payment_provider": "Stripe"}
 METRIC = "payment_timeout_rate"
