@@ -41,11 +41,14 @@ from scipy import stats
 from .baseline import SeriesBaseline
 
 SPIKE_Z, CUSUM_K, CUSUM_H, RECOVER_HOURS, LOOKBACK_H = 4.5, 1.0, 8.0, 3, 6
+MIN_HISTORY_HOURS = 12             # fewer complete history hours: no reliable noise estimate, do not judge
+PLAN_END_HOURS = 2                 # consecutive hours back at the unplanned baseline that end a planned change
 CAMPAIGN_DEFAULT_HOURS = 24        # Event has no end time in the contract: campaigns are assumed to last a day
 KEY_METRICS = ["contribution", "gmv", "orders", "conversion_rate", "payment_success_rate", "sessions"]
 SCAN_FDR_Q, SCAN_PHI, SCAN_MIN_REL = 1e-3, 2.0, 0.10
 DEFAULT_FEATURES = {"scan": True, "riskloc": True, "process": True, "learning": True,
-                    "bfs": True}   # bfs: the investigator's pruned graph search (v3); off = greedy v2 walk
+                    "bfs": True,          # the investigator's pruned graph search (v3); off = greedy v2 walk
+                    "calibrate": True}    # data profile + calibration, planned-effect end, slow harm (v4)
 
 
 def seg_from_key(key: str) -> dict:
@@ -68,6 +71,8 @@ class MonitorEngine:
         self.series: dict[tuple[str, str], list[dict]] = defaultdict(list)
         self.innocent_seen: set[tuple[str, str, str]] = set()
         self.tick_no = 0
+        self.calibration: dict = {"phi": {}, "target_metrics": set(), "common_shock": {}}   # set by DataProfile
+        self._plan_end: dict[str, pd.Timestamp] = {}
 
     # ================================================================ baselines
     def fit(self, metrics: list[str] | None = None):
@@ -100,8 +105,47 @@ class MonitorEngine:
         if key not in cache:
             evs = self.data.events(ts - timedelta(hours=CAMPAIGN_DEFAULT_HOURS), ts + timedelta(hours=1))
             cache[key] = [e for e in evs if e.planned and e.expected_effect and
-                          pd.Timestamp(e.ts) <= ts < pd.Timestamp(e.ts) + timedelta(hours=CAMPAIGN_DEFAULT_HOURS)]
+                          pd.Timestamp(e.ts) <= ts < pd.Timestamp(e.ts) + timedelta(hours=CAMPAIGN_DEFAULT_HOURS)
+                          and (not self.features["calibrate"] or ts < (self.planned_end(e) or pd.Timestamp.max))]
         return cache[key]
+
+    def planned_end(self, ev) -> pd.Timestamp | None:
+        """The contract's events carry no end time. A planned change is over once the scoped volume it was
+        expected to move is back at its unplanned baseline for PLAN_END_HOURS consecutive complete hours
+        (closer to the baseline than to the planned level, in log terms). Found once, then fixed."""
+        if ev.id in self._plan_end:
+            return self._plan_end[ev.id]
+        now = pd.Timestamp(getattr(self.data, "now", self.h1))
+        key = ("plan_end_checked", ev.id, now)
+        if key in self.__dict__.setdefault("_plan_checks", set()):
+            return None
+        self._plan_checks.add(key)
+        eff = next(((m, f) for m, f in ev.expected_effect.items() if m in self.g.nodes and f and f != 1), None)
+        if eff is None:
+            return None
+        m, f = eff
+        scope = {k: v for k, v in (ev.scope or {}).items() if k in self.g.nodes[m].dimensions}
+        t0 = pd.Timestamp(ev.ts).floor("h") + timedelta(hours=2)      # allow the change to ramp up
+        if now - t0 < timedelta(hours=PLAN_END_HOURS):
+            return None
+        df = self.data.metric(m, t0, now, filters=scope)
+        df = df[df.complete].dropna(subset=["value"])
+        b, run = self.baseline(m, scope), []
+        for r in df.itertuples():
+            base = b.expected(r.ts)[0]
+            if base <= 0:
+                continue
+            lr = np.log(max(r.value, 1e-9) / base)
+            run = run + [pd.Timestamp(r.ts)] if abs(lr) < abs(lr - np.log(f)) else []
+            if len(run) >= PLAN_END_HOURS:
+                self._plan_end[ev.id] = run[0]
+                self.bus.publish("PLANNED_EFFECT_ENDED", "monitor", {
+                    "event": ev.id, "description": ev.description, "metric": m, "scope": scope,
+                    "ended_at": str(run[0]), "expected_factor": f,
+                    "why": f"{m} [{seg_key(scope) or 'total'}] back at its unplanned baseline for "
+                           f"{PLAN_END_HOURS} hours from {run[0]:%m-%d %H:%M}"})
+                return run[0]
+        return None
 
     def planned_factor(self, metric: str, segment: dict, ts) -> tuple[float, list[str]]:
         """Expected-volume multiplier from planned events. Traffic effects (sessions) scale every volume
@@ -244,10 +288,68 @@ class MonitorEngine:
                                                      "reasons": dict(reasons)})
         return anomalies
 
+    def early_tick(self, window_start) -> list[dict]:
+        """Early warning on a rolling one-hour window (sources that publish them, e.g. Eye every five
+        minutes). Each watched series is compared with the baseline of the local hour the window mostly
+        covers, with the same small-sample threshold as the hourly spike detector. A hit is published as
+        EARLY_WARNING (and remembered per series and hour); the investigation still runs on the complete
+        hour, so an early warning adds speed without adding unexplained pages."""
+        if not hasattr(self.data, "rolling_metric"):
+            return []
+        ws = pd.Timestamp(window_start)
+        hour = (ws + timedelta(minutes=30)).floor("h")
+        out = []
+        for m, gb, _ in self.watch_plan(hour + timedelta(hours=1)):
+            if m in self.g.profile.get("silent_metrics", ()):
+                continue
+            try:
+                df = self.data.rolling_metric(m, ws, group_by=gb)
+            except ValueError:
+                continue
+            if df.empty:
+                continue
+            node = self.g.nodes[m]
+            groups = df.groupby(gb[0]) if gb else [(None, df)]
+            for member, part in groups:
+                seg = {gb[0]: str(member)} if gb else {}
+                for row in part.itertuples():
+                    if not row.complete or row.value != row.value:
+                        continue
+                    wkey = ("early", m, seg_key(seg), hour)
+                    if wkey in self.evaluated:
+                        continue
+                    b = self.baseline(m, seg)
+                    if b.n_hist < MIN_HISTORY_HOURS:
+                        continue
+                    factor, _ = self.planned_factor(m, seg, hour)
+                    s = b.score(hour, row.value, row.denominator, factor)
+                    support = row.denominator >= 100 if node.kind in ("ratio", "gauge") else s["expected"] >= 20
+                    if support and abs(s["z"]) >= self.spike_threshold(b.n_hist):
+                        self.evaluated.add(wkey)
+                        w = {"metric": m, "segment": seg_key(seg), "window_start": str(ws), "hour": str(hour),
+                             "actual": row.value, "expected": s["expected"], "z": s["z"],
+                             "direction": "up" if s["z"] > 0 else "down", "good_direction": node.good_direction,
+                             "impact_eur_per_h": self.impact_eur(m, seg, hour, row.value, s["expected"])}
+                        self.bus.publish("EARLY_WARNING", "monitor", w)
+                        out.append(w)
+        return out
+
+    @staticmethod
+    def spike_threshold(n_hist: int) -> float:
+        """SPIKE_Z under a normal noise model; with little history the noise scale is itself uncertain, so
+        the threshold is the Student-t quantile (n - 1 df) with the same tail probability. 56 days of history
+        give ~4.5; 16 hours give ~7.5."""
+        cache = MonitorEngine.__dict__.get("_thr_cache")
+        if cache is None:
+            cache = MonitorEngine._thr_cache = {}
+        if n_hist not in cache:
+            cache[n_hist] = max(SPIKE_Z, float(stats.t.isf(stats.norm.sf(SPIKE_Z), df=max(n_hist - 1, 1))))
+        return cache[n_hist]
+
     def _judge(self, m: str, seg: dict, ts, row) -> dict | None:
         node = self.g.nodes[m]
         b = self.baseline(m, seg)
-        if b.n_hist < 50 or np.isnan(row.value):
+        if b.n_hist < MIN_HISTORY_HOURS or np.isnan(row.value) or m in self.g.profile.get("silent_metrics", ()):
             return None
         factor, why = self.planned_factor(m, seg, ts)
         s = b.score(ts, row.value, row.denominator, factor)
@@ -260,7 +362,7 @@ class MonitorEngine:
         z = float(np.clip(s["z"], -8, 8))
         st["cpos"] = max(0.0, st["cpos"] + z - CUSUM_K)
         st["cneg"] = max(0.0, st["cneg"] - z - CUSUM_K)
-        spike = support and abs(s["z"]) >= SPIKE_Z
+        spike = support and abs(s["z"]) >= self.spike_threshold(b.n_hist)
         drift = support and max(st["cpos"], st["cneg"]) >= CUSUM_H
         if factor != 1.0 and abs(raw["z"]) >= SPIKE_Z and not (spike or drift):
             k = (m, seg_key(seg), why[0])
@@ -330,17 +432,18 @@ class MonitorEngine:
                     self.evaluated.add(key)
                     factor, _ = self.planned_factor(m, seg, pd.Timestamp(r.ts))   # planned + learned
                     sd = r.sd if r.sd == r.sd else 0.0                             # cell's own history spread
+                    phi = max(SCAN_PHI, self.calibration["phi"].get(m, SCAN_PHI))  # pooled (calibration)
                     if node.kind == "ratio":
                         if not r.den or r.denominator < 50:
                             continue
                         p = min(max(r.num / r.den * factor, 1e-4), 1 - 1e-4)
                         exp, act = p, r.value
-                        z = (act - p) / max(sd, np.sqrt(SCAN_PHI * p * (1 - p) / r.denominator))
+                        z = (act - p) / max(sd, np.sqrt(phi * p * (1 - p) / r.denominator))
                     else:
                         if r.val < 20:
                             continue
                         exp, act = r.val * factor, r.value
-                        z = (act - exp) / max(sd * factor, np.sqrt(SCAN_PHI * exp))
+                        z = (act - exp) / max(sd * factor, np.sqrt(phi * exp))
                     rel = act / exp - 1 if exp else 0.0
                     tests.append((float(2 * stats.norm.sf(abs(z))), z, rel, m, seg, pd.Timestamp(r.ts), act, exp))
         if not tests:
@@ -384,7 +487,7 @@ class MonitorEngine:
         leaves = self.forecaster.leaves(a["metric"], list(seg) + dims, ts, ts + timedelta(hours=1))
         for k, v in seg.items():
             leaves = leaves[leaves[k].astype(str) == v]
-        res = riskloc(leaves, dims)
+        res = riskloc(leaves, dims, phi=self.calibration["phi"].get(a["metric"], 1.0))
         causes = [{**c, "segment": {**seg, **c["segment"]}} for c in res.get("causes", [])]
         a["clues"] = causes
         self.bus.publish("LOCALISATION_CLUE", "monitor", {

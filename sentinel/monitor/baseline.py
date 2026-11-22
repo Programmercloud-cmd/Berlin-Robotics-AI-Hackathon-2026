@@ -41,13 +41,20 @@ class SeriesBaseline:
         self.n_hist = len(h)
         if h.empty:
             self.med, self.med_den, self.sig, self.phi = {}, {}, {}, 1.0
+            self.med_hour, self.med_den_hour, self.sig_hour = {}, {}, {}
             self.overall, self.overall_den, self.sig_all = np.nan, np.nan, 0.05
             return
         k = local_profile_key(h.ts).values
         self.med = h.groupby(k).value.median().to_dict()
         self.med_den = h.groupby(k).denominator.median().to_dict()
+        # fallback when an hour key has no history (e.g. a Saturday after weekday-only history): the same
+        # local hour on any day type, then the overall level
+        hk = np.array([x[:-2] for x in k])
+        self.med_hour = h.groupby(hk).value.median().to_dict()
+        self.med_den_hour = h.groupby(hk).denominator.median().to_dict()
         self.overall, self.overall_den = float(h.value.median()), float(h.denominator.median())
         exp = np.array([self.med[x] for x in k])
+        self.sig_hour: dict = {}
         if self.binomial:
             p = np.clip(exp, 1e-4, 1 - 1e-4)
             z = (h.value.values - p) / np.sqrt(p * (1 - p) / np.maximum(h.denominator.values, 1))
@@ -61,11 +68,17 @@ class SeriesBaseline:
             g = fr.groupby("k").dev.agg(["median", "size"])
             g = g[g["size"] >= 6]
             self.sig = {key: max(self.sig_all * 0.7, MAD * float(v)) for key, v in g["median"].items()}
+            for key, v in self.sig.items():
+                self.sig_hour.setdefault(key[:-2], v)
             self.phi = 1.0
 
     def expected(self, ts) -> tuple[float, float]:
         key = profile_key(pd.Timestamp(ts))
-        return float(self.med.get(key, self.overall)), float(self.med_den.get(key, self.overall_den))
+        if key in self.med:
+            return float(self.med[key]), float(self.med_den.get(key, self.overall_den))
+        hk = key[:-2]
+        return (float(self.med_hour.get(hk, self.overall)),
+                float(self.med_den_hour.get(hk, self.overall_den)))
 
     def score(self, ts, value: float, denominator: float, factor: float = 1.0) -> dict:
         """Expected value, 4-sigma band and z for one hour. `factor` scales volume (planned events)."""
@@ -76,7 +89,7 @@ class SeriesBaseline:
             z = (value - p) / se
             return {"expected": p, "low": max(0.0, p - 4 * se), "high": min(1.0, p + 4 * se), "z": z}
         key = profile_key(pd.Timestamp(ts))
-        s = self.sig.get(key, self.sig_all)
+        s = self.sig.get(key, self.sig_hour.get(key[:-2], self.sig_all))
         exp = exp * factor
         if self.kind in ("count", "sum"):   # Poisson floor for small counts
             s = float(np.hypot(s, 1 / np.sqrt(max(exp, 1)))) if self.kind == "count" else s
@@ -85,7 +98,7 @@ class SeriesBaseline:
 
     def window(self, df: pd.DataFrame, factor_fn=None) -> dict:
         """Aggregate actual vs expected over several hours (ratio of sums for ratios)."""
-        d = df.dropna(subset=["value"])
+        d = df.dropna(subset=["value"]) if "value" in df else df.iloc[0:0]
         if d.empty:
             return {"actual": np.nan, "expected": np.nan, "rel": np.nan, "z": 0.0, "hours": 0}
         exps = np.array([self.expected(t)[0] for t in d.ts])

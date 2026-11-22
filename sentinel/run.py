@@ -42,9 +42,12 @@ class Runtime:
         self.bus.sim_ts = str(LIVE_START)
         self.bus.publish("SYSTEM", "runtime", {"message": "starting: building the metric graph from the seed"})
         self.graph = BrainGraph.from_seed()
-        self.data = FakeData(list(self.graph.nodes.values()), self.graph.formulas,
-                             scenarios=getattr(args, "scenarios", None), seed=getattr(args, "seed", 42),
-                             overrides=getattr(args, "overrides", None))
+        source = FakeData
+        if getattr(args, "data", "fake") == "shoply":     # Chaimaa's Shoply simulator (branch chaimaa)
+            from sentinel.adapters.shoply import ShoplyData as source
+        self.data = source(list(self.graph.nodes.values()), self.graph.formulas,
+                           scenarios=getattr(args, "scenarios", None), seed=getattr(args, "seed", 42),
+                           overrides=getattr(args, "overrides", None))
         self.data.now = LIVE_START
         summary = validate_graph(self.graph, self.data, LIVE_START)
         self.bus.publish("GRAPH_LOADED", "graph", {"metrics": len(self.graph.nodes), "edges": len(self.graph.edges),
@@ -54,6 +57,9 @@ class Runtime:
         self.monitor = MonitorEngine(self.graph, self.data, self.bus, LIVE_START - pd.Timedelta(days=56), LIVE_START,
                                      features=getattr(args, "features", None))
         self.monitor.fit()
+        if self.monitor.features.get("calibrate", True):      # 0. study the data before trusting defaults
+            from sentinel.calibrate import DataProfile
+            self.profile = DataProfile(self.graph, self.data, self.monitor, self.bus).run()
         self.meta = None if args.no_meta else MetaAgent(self.graph, self.data, self.monitor, self.bus)
         self.investigator = Investigator(self.graph, self.data, self.monitor, self.bus, meta=self.meta)
         self.incidents = IncidentManager(self.graph, self.monitor, self.investigator, self.bus)
@@ -88,6 +94,8 @@ def main(argv=None):
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--add-metric-at", default="2026-10-26T23:00", help="when a contributor submits payment_cost_rate")
     p.add_argument("--no-meta", action="store_true")
+    p.add_argument("--data", choices=["fake", "shoply"], default="fake",
+                   help="fake: dev/fake_data.py; shoply: Chaimaa's Shoply simulator (.shoply-chaimaa checkout)")
     a = p.parse_args(argv)
     speed = a.speed if a.speed is not None else (1.5 if a.mode == "live" else 0.0)
 

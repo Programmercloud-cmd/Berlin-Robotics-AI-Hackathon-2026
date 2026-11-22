@@ -50,6 +50,7 @@ def fmt_seg(seg: dict) -> str:
 
 
 UNCONFIRMED_Z = 3.0      # an input must move this much for a formula output's change to count
+SCOPED_RELEASE_LOOKBACK_H = 12  # how far back a release scoped exactly to the affected slice stays a suspect
 Z_PRUNE = 3.0            # BFS: a neighbour inside its own noise band (|z| < 3) is pruned with its whole branch
 SHARE_EXPAND = 0.2       # BFS: an anomalous formula input is expanded only if it carries >= 20% of the change
 MAX_WALK_NODES = 12      # BFS budget (nodes decomposed per investigation)
@@ -190,6 +191,9 @@ class Investigator:
         now = pd.Timestamp(now)
         a_ts = pd.Timestamp(anomaly["ts"])
         case = Case(inc, anomaly, a_ts - timedelta(hours=2), now)
+        if anomaly.get("frame"):
+            case.notes["frame"] = anomaly["frame"]
+            case.notes["claims"] = list(anomaly.get("claims") or [])
         self.bus.publish("THOUGHT", "investigator", {"stage": "start", "text":
             f"Alert on {anomaly['metric']} [{fmt_seg(case.seg)}] at {anomaly['ts']}: actual {anomaly['actual']:.4g} vs "
             f"expected {anomaly['expected']:.4g} (z={anomaly['z']:+.1f}). Start an investigation."}, inc.id)
@@ -427,11 +431,16 @@ class Investigator:
                               f"drilldown({case.focus}, {fmt_seg(case.seg)}, by={d})",
                               lambda d=d: self.tools.drilldown(case.focus, case.seg, d, start, end),
                               lambda r: self._drill_text(r), params={"by": d},
-                              verdict=lambda r: ("concentrated" if r.get("top") and r["top"]["dev_share"] >= 0.6
-                                                 and r["top"]["lift"] >= 1.5 and abs(r["top"]["z"]) >= 3
+                              verdict=lambda r: ("concentrated" if r.get("top") and abs(r["top"]["z"]) >= 3 and (
+                                  (r["top"]["dev_share"] >= 0.6 and r["top"]["lift"] >= 1.5) or
+                                  (r["top"]["dev_share"] >= 0.8 and all(abs(m["z"]) < 2 for m in r["members"]
+                                                                       if m["member"] != r["top"]["member"])))
                                                  else "spread"))
                 top = r.get("top")
-                if top and top["dev_share"] >= 0.6 and top["lift"] >= 1.5 and abs(top["z"]) >= 3:
+                others_normal = top is not None and all(abs(m["z"]) < 2 for m in r.get("members", [])
+                                                        if m["member"] != top["member"])
+                if top and abs(top["z"]) >= 3 and ((top["dev_share"] >= 0.6 and top["lift"] >= 1.5)
+                                                   or (top["dev_share"] >= 0.8 and others_normal)):
                     if best is None or top["lift"] > best[1]["lift"]:
                         best = (d, top)
             if not best:
@@ -455,7 +464,7 @@ class Investigator:
         # events near the onset
         evs = self.step(case, "events", "Did anything change (release, config, campaign) around the onset?",
                         f"events({onset - timedelta(hours=3)}..{onset + timedelta(hours=1)})",
-                        lambda: self._candidate_events(onset),
+                        lambda: self._candidate_events(onset, case.seg),
                         lambda r: ((f"{len(r)} events: " + "; ".join(f"{e.ts:%H:%M} {e.type} {e.service or ''} "
                                                                        f"'{e.description}' scope={fmt_seg(e.scope)}" for e in r))
                                    if r else "no events near the onset", {"events": len(r)}),
@@ -482,8 +491,16 @@ class Investigator:
                     continue
                 dt = (onset - pd.Timestamp(e.ts)).total_seconds() / 3600
                 if e.planned and e.type == "campaign":
-                    self.judge(case, h, "onset falls inside the running campaign window", 0 <= dt <= 24,
-                               f"campaign started {e.ts:%m-%d %H:%M}, onset {onset:%m-%d %H:%M}", ev_events)
+                    ended = self.mon.planned_end(e) if self.mon.features.get("calibrate", True) else None
+                    running = 0 <= dt and (onset < ended if ended is not None else dt <= 24)
+                    self.judge(case, h, "onset falls inside the running campaign window", running,
+                               f"campaign started {e.ts:%m-%d %H:%M}, onset {onset:%m-%d %H:%M}"
+                               + (f", campaign effect ended {ended:%m-%d %H:%M} (measured)" if ended is not None
+                                  else ""), ev_events)
+                elif 3 < dt <= SCOPED_RELEASE_LOOKBACK_H and e.scope:
+                    self.judge(case, h, "release scoped to the affected slice precedes a slow onset", True,
+                               f"release {e.ts:%m-%d %H:%M}, onset {onset:%m-%d %H:%M} ({dt:.0f} h later); "
+                               f"scope {fmt_seg(e.scope)} = affected slice", ev_events)
                 else:
                     self.judge(case, h, "onset coincides with the event (<= 1h)", abs(dt) <= 1.0,
                                f"onset {onset:%H:%M}, event {e.ts:%H:%M}", ev_events)
@@ -584,6 +601,7 @@ class Investigator:
                 self.judge(case, h, "Granger precedence", r["granger_p"] < 0.01, f"p={r['granger_p']:.2g}", ev_c)
             if not r["consistent"]:
                 h.status = "rejected"
+        self._test_claims(case, start, end)
         if pruned:
             self._prune_record(case, f"{case.focus} (causal parents)", pruned, case.notes.setdefault(
                 "walk", {"visited": [], "anomalous": [], "pruned": [], "edges": [], "secondary": []}))
@@ -601,6 +619,48 @@ class Investigator:
                                f"{c} belongs to {e.service} and moved with the expected sign at the onset",
                                case.hyp_meta[cause_h.id].get("ev", []))
 
+    def _test_claims(self, case: Case, start, end):
+        """Causes the operator's text claims, tested as hypotheses on the data. A claim the telemetry cannot
+        identify stays unresolved at its prior; the text itself is never evidence."""
+        for c in case.notes.get("claims") or []:
+            if c.get("tested"):
+                continue
+            c["tested"] = True
+            h = self.add_hyp(case, f"operator premise: {c['phrase']}", "premise", 0.2, {"claim": c})
+            d, v = c.get("dimension"), c.get("value")
+            if d and v and d in self.g.nodes[case.focus].dimensions:
+                parent = {k: x for k, x in case.seg.items() if k != d}
+                dd = self.step(case, "localise", f"{h.id}: does the change concentrate in {d}={v}, as the text claims?",
+                               f"drilldown({case.focus}, {fmt_seg(parent)}, by={d})",
+                               lambda: self.tools.drilldown(case.focus, parent, d, start, end),
+                               lambda r: self._drill_text(r), params={"by": d, "claim": c["phrase"]})
+                me = next((m for m in dd["members"] if str(m["member"]) == str(v)), None)
+                ok = bool(me and me["lift"] >= 1.3 and me["dev_share"] >= 0.4 and abs(me["z"]) >= 3)
+                self.judge(case, h, f"change concentrated in {d}={v}", ok,
+                           (f"{v} carries {me['dev_share']:.0%} of the change with {me['vol_share']:.0%} of volume"
+                            if me else f"{d}={v} not present"), self.last_ev(case))
+                continue
+            if c.get("kind") == "release":
+                evs = self._candidate_events(pd.Timestamp(case.notes.get("onset", start)), case.seg)
+                words = {w for w in c["phrase"].lower().replace("-", " ").split() if len(w) > 3}
+                hit = [e for e in evs if e.type == "release" and words & set(
+                    f"{e.service or ''} {e.description}".lower().replace("-", " ").split())]
+                ev = self.record(case, "events", "match_claim", f"events near onset vs claim '{c['phrase']}'",
+                                 (f"recorded release(s) matching the claim: " + "; ".join(
+                                     f"{e.ts:%H:%M} {e.service} '{e.description}'" for e in hit)) if hit else
+                                 "no recorded or measured release matches the claim", {"matches": len(hit)},
+                                 signal="event_match", params={"claim": c["phrase"]},
+                                 verdict="match" if hit else "no_match")
+                self.judge(case, h, "a release matching the claim was recorded near the onset", bool(hit),
+                           f"{len(hit)} matching release(s)", [ev.id])
+                continue
+            ev = self.record(case, "events", "claim_identifiable", f"catalog dimensions vs claim '{c['phrase']}'",
+                             f"no metric, dimension or event in the telemetry identifies '{c['phrase']}': "
+                             "left unresolved", {"identifiable": 0}, signal="graph_structure",
+                             params={"claim": c["phrase"]}, verdict="unverifiable")
+            self.judge(case, h, "the telemetry can identify the claimed cause", None,
+                       "no dimension or event identifies it; the premise stays a hypothesis", [ev.id])
+
     def mechanism(self, case: Case, start, end):
         """Which concrete events changed inside the segment? (e.g. payment_timed_out share 2% -> 63%).
         This is the observed failure mechanism, not yet its underlying cause."""
@@ -608,6 +668,9 @@ class Investigator:
         if len(acts) < 2:
             return
         denominators = {"payment_attempted", "session_started", "search_requested", "feed_impression"}
+        calc = getattr(self.data, "catalog", {}).get(case.focus, {}).get("calculation", {})
+        if calc.get("denominator_activity"):
+            denominators.add(calc["denominator_activity"])   # e.g. checkout_started for checkout completion
         outcomes = [a for a in acts if a not in denominators] or acts
         mix = self.step(case, "predict", f"Which events behind {case.focus} changed inside {fmt_seg(case.seg)}?",
                         f"activity_mix({outcomes}, {fmt_seg(case.seg)}, now vs same hours on 7 previous days)",
@@ -670,7 +733,10 @@ class Investigator:
                      for i in link.evidence_ids if i in by_id}
             h.score = round(h.posterior * (0.85 + 0.05 * min(3, len(kinds))), 4) if h.status != "rejected" else 0.0
         # ranking: posterior first (the labels' thresholds), the hybrid score breaks ties
-        best = max((h for h in case.hyps if h.status != "rejected"), key=lambda h: (h.posterior, h.score), default=None)
+        # an untested operator premise is listed, never presented as the leading explanation
+        cands = [h for h in case.hyps if h.status != "rejected" and not (
+            h.source == "premise" and not any(link.result == "confirmed" for link in h.evidence))]
+        best = max(cands, key=lambda h: (h.posterior, h.score), default=None)
         if label is None:
             ev = case.hyp_meta.get(best.id, {}).get("event") if best else None
             if best and ev is not None and ev.planned and best.posterior >= 0.5:
@@ -711,32 +777,54 @@ class Investigator:
         money_base = self.mon.baseline(money_id, {}).expected(ts_mid)[0] if money_id in self.g.nodes else 0.0
         margin = money_base / max(self.mon.baseline(gmv_id, {}).expected(ts_mid)[0], 1e-9)
         d_gmv = ((w["actual"] - w["expected"]) * scale) if np.isfinite(w.get("actual", np.nan)) else 0.0
-        money_total = d_gmv * margin
+        money_total, money_from = d_gmv * margin, "gmv_margin"
         # attribute only what the first cause explains: push its own deviation through the formula graph
         # (the segment's GMV can also move for other reasons, e.g. a concurrent incident)
         f = self.tools.window_dev(case.focus, case.seg, case.start, case.end)
         if np.isfinite(f.get("actual", np.nan)) and f.get("expected") and case.focus in self.g.nodes:
             per_h = self.mon.impact_eur(case.focus, case.seg, ts_mid, f["actual"], f["expected"])
             if per_h or money_id in self.mon.propagate(case.focus, 0.01, ts_mid)["relative_changes"]:
-                money_total = per_h * hours
+                money_total, money_from = per_h * hours, "propagation"
+        targets = getattr(self.mon, "calibration", {}).get("target_metrics", set())
+        near = {case.focus, *case.chain} | {e.src for e in self.g.causes(case.focus)}
+        for t in sorted(targets & near):
+            tseg = {k: v for k, v in case.seg.items() if k in self.g.nodes[t].dimensions}
+            tw = self.tools.window_dev(t, tseg, case.start, case.end)
+            if np.isfinite(tw.get("actual", np.nan)) and abs(tw.get("z", 0.0)) >= 3 and tw.get("volume"):
+                harm = abs(tw["actual"] - tw["expected"]) * tw["volume"]          # e.g. EUR over / under plan
+                out["target_harm"] = {"metric": t, "segment": fmt_seg(tseg), "eur_total": harm,
+                                      "eur_per_h": harm / hours, "actual": tw["actual"], "expected": tw["expected"]}
+                money_total = min(money_total, -harm)       # alert on it even if the marketplace earns more
+                break
         out.update({"hours": hours, "gmv_delta_eur": d_gmv, "money_label": prof.get("money_label", "contribution"),
                     "orders_delta": (o["actual"] - o["expected"]) if np.isfinite(o.get("actual", np.nan)) else 0.0,
-                    "margin": margin, "contribution_eur_total": money_total,
+                    "margin": margin, "money_from": money_from, "contribution_eur_total": money_total,
                     "contribution_eur_per_h": money_total / hours})
         return out
 
-    def _candidate_events(self, onset):
+    def _candidate_events(self, onset, seg: dict | None = None):
+        """Events near the onset, campaigns still running, and earlier releases scoped exactly to the
+        affected slice: a harm that builds up slowly (a model that degrades conversion over hours) is
+        detected long after its release, which is still the prime suspect when its scope matches."""
         near = self.data.events(onset - timedelta(hours=3), onset + timedelta(hours=2))
-        running = [e for e in self.data.events(onset - timedelta(hours=24), onset - timedelta(hours=3))
-                   if e.planned and e.type == "campaign"]
-        return running + near
+        look = SCOPED_RELEASE_LOOKBACK_H if self.mon.features.get("calibrate", True) else 24
+        earlier = self.data.events(onset - timedelta(hours=look), onset - timedelta(hours=3))
+        running = [e for e in earlier if e.planned and e.type == "campaign"
+                   and onset - pd.Timestamp(e.ts) <= timedelta(hours=24)]
+        scoped = [e for e in earlier if not e.planned and e.type in ("release", "config") and e.scope and seg
+                  and all(seg.get(k) == v for k, v in e.scope.items())
+                  and self.mon.features.get("calibrate", True)]
+        return running + scoped + near
 
     @staticmethod
     def _control_text(case, key, r):
         if not r.get("possible"):
             return "not testable", {}
+        verdict = "specific to this segment" if r["confined"] else "not specific"
+        if r["confined"] and r.get("significant") is False:
+            verdict = "larger here than in the other values, but not statistically significant across hours"
         txt = (f"{key}={case.seg[key]}: {r['focus_rel']:+.1%} (z={r['focus_z']:+.1f}) vs other {key} values "
-               f"{r['siblings_rel']:+.1%} -> {'specific to this segment' if r['confined'] else 'not specific'}")
+               f"{r['siblings_rel']:+.1%} -> {verdict}")
         if "p" in r:
             txt += f" (Welch t={r['t']:.1f}, p={r['p']:.1e})"
         return txt, {k: r[k] for k in ("focus_rel", "siblings_rel", "focus_z") if k in r}

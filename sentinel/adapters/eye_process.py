@@ -72,7 +72,9 @@ class AgentMetricsEngine:
         rows = self.db.execute(
             """select o.id as case_id, e.activity, e.occurred_at, e.window_start, e.attrs
                from events e join event_objects eo on eo.event_id = e.id join objects o on o.id = eo.object_id
-               where o.type = %s and e.window_start = any(%s) order by o.id, e.occurred_at, e.id""",
+               where o.type = %s and e.window_start = any(%s)
+                 and e.ingested_at <= e.window_start + interval '75 minutes'   -- Eye: observed at end + GRACE
+               order by o.id, e.occurred_at, e.id""",
             (object_type, [_aware(w) for w in windows])).fetchall()
         if not rows:
             return pd.DataFrame()
@@ -113,7 +115,8 @@ class AgentMetricsEngine:
     def _event_ratio(self, metric, windows) -> list[tuple]:
         c = metric["calculation"]
         rows = self.db.execute(
-            """select window_start, activity, attrs from events where activity in (%s, %s) and window_start = any(%s)""",
+            """select window_start, activity, attrs from events where activity in (%s, %s)
+                 and window_start = any(%s) and ingested_at <= window_start + interval '75 minutes'""",
             (c["activity"], c["denominator_activity"], [_aware(w) for w in windows])).fetchall()
         groups = defaultdict(lambda: [0.0, 0.0])
         for w in windows:

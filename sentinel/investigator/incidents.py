@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import timedelta
 
 import numpy as np
@@ -20,6 +21,8 @@ from sentinel.contracts import Anomaly, Incident, seg_key
 from .react import Investigator, fmt_seg
 
 ALERT_MIN_EUR_PER_H, RESOLVE_HOURS, ATTACH_HOURS, MIN_INVESTIGATE_EUR_PER_H = 50.0, 3, 8, 25.0
+COOCCUR_HOPS = 2      # co-occurring incidents of metrics this close in the graph are one silent fault
+SLOW_HARM_HOPS = 4    # metric-graph distance within which a slow harm joins the incident of its root event
 LEARN_HOURS = 24      # how long a learned "normal" pattern corrects the baseline
 
 
@@ -41,6 +44,7 @@ class IncidentManager:
         self.normal_run: dict[str, int] = {}
         self.last_seen: dict[str, pd.Timestamp] = {}
         self.alerted: set[str] = set()
+        self.merged: dict[str, str] = {}        # merged incident -> the incident it was merged into
 
     # ------------------------------------------------------------------ anomalies -> incidents
     def handle(self, anomalies: list[dict], now) -> list[str]:
@@ -64,6 +68,7 @@ class IncidentManager:
             self.cases[inc.id] = case
             self.related[inc.id] = self._related_set(case)
             self._after_conclusion(inc, now)
+            inc = self.incidents[self.merged.get(inc.id, inc.id)]   # merged: further symptoms join the survivor
             changed.append(inc.id)
             # anomalies of this tick explained by the new incident
             rest = []
@@ -92,7 +97,9 @@ class IncidentManager:
         incident's segment carries most of the anomaly's deviation (so an explained campaign incident cannot
         swallow a payment fault that merely overlaps it)."""
         aseg, iseg = parse_seg(a["segment"]), parse_seg(inc.segment)
-        if a["metric"] not in self.related.get(inc.id, set()) or not compatible(aseg, iseg):
+        if not compatible(aseg, iseg):
+            return False
+        if a["metric"] not in self.related.get(inc.id, set()) and not self._same_root_slice(inc, a, aseg, iseg):
             return False
         # a minor incident without a supported cause cannot explain a much larger anomaly
         case = self.cases.get(inc.id)
@@ -122,6 +129,92 @@ class IncidentManager:
         vi = inner.get("volume", inner.get("expected", 0.0)) or 0.0
         vol_share = vi / vo if vo else 1.0
         return share >= 0.5 and share >= min(1.0, 1.5 * vol_share)
+
+    def _alert_host(self, inc: Incident):
+        """An alerted incident with a supported cause, opened within the hour, whose slice shares a
+        dimension value with this one (or one of them is the total). Only for incidents that have no
+        supported cause of their own: an independent fault with its own evidence still pages."""
+        if inc.label not in ("unexplained", "hypothesis"):
+            return None
+        mine = parse_seg(inc.segment)
+        for i in sorted(self.incidents.values(), key=lambda x: x.opened_at):
+            if i.id == inc.id or i.id not in self.alerted or i.label != "supported_cause":
+                continue
+            if abs(pd.Timestamp(i.opened_at) - pd.Timestamp(inc.opened_at)) > timedelta(hours=1):
+                continue
+            other = parse_seg(i.segment)
+            if compatible(mine, other) and (not mine or not other or set(mine.items()) & set(other.items())):
+                return i
+        return None
+
+    def _co_occurring(self, inc: Incident):
+        """An open incident opened within the hour whose first cause is linked to this one's (one lies in the
+        other's downstream / related set) and whose slice overlaps (shares a key=value, or one is the total).
+        Returns (incident, new_is_upstream) or None."""
+        mine = parse_seg(inc.segment)
+        settled = ("explained", "data_issue")      # a planned change or a data issue is its own explanation
+        if inc.label in settled:
+            return None
+        for i in sorted(self.incidents.values(), key=lambda x: x.opened_at):
+            if i.label in settled:
+                continue
+            if i.id == inc.id or i.state == "resolved" or abs(pd.Timestamp(i.opened_at) - pd.Timestamp(inc.opened_at)) \
+                    > timedelta(hours=1):
+                continue
+            other = parse_seg(i.segment)
+            if not compatible(mine, other):
+                continue
+            shares = not mine or not other or bool(set(mine.items()) & set(other.items()))
+            if shares and inc.first_cause in self.related.get(i.id, set()):
+                return i, False
+            if shares and i.first_cause in self.related.get(inc.id, set()):
+                return i, True
+            # compatible slices of the same or a directly linked metric (<= COOCCUR_HOPS) in the same hour
+            if self._graph_distance(i.first_cause, inc.first_cause) <= COOCCUR_HOPS:
+                return i, inc.first_cause in self.g.upstream(i.first_cause)
+        return None
+
+    def _same_root_slice(self, inc: Incident, a: dict, aseg: dict, iseg: dict) -> bool:
+        """An anomaly in a metric the graph does not list as related still belongs to an incident when it
+        sits inside the incident's slice, the incident has a supported root event, and the two metrics are
+        close in the metric graph (<= SLOW_HARM_HOPS): e.g. add-to-cart in channel=for_you falling hours after a
+        recommendation release first showed up as a CTR rise in the same channel."""
+        if not self.mon.features.get("calibrate", True):
+            return False
+        case = self.cases.get(inc.id)
+        root = None
+        if case is not None:
+            evh = [h for h in case.hyps if h.status != "rejected" and h.posterior >= 0.5
+                   and case.hyp_meta.get(h.id, {}).get("event") is not None]
+            root = case.hyp_meta[max(evh, key=lambda h: h.posterior).id]["event"] if evh else None
+        # unplanned root events only: an explained campaign must not swallow a real fault in its slice
+        if not iseg or not all(aseg.get(k) == v for k, v in iseg.items()) or root is None or root.planned:
+            return False
+        return self._graph_distance(inc.first_cause, a["metric"]) <= SLOW_HARM_HOPS
+
+    def _graph_distance(self, a: str, b: str) -> int:
+        if a == b:
+            return 0
+        sig = len(self.g.edges)                       # rebuilt only when the graph changes
+        if getattr(self, "_adj_sig", None) != sig:
+            adj = defaultdict(set)
+            for e in self.g.edges.values():
+                if e.type in ("formula", "causal") and e.status not in ("rejected",):
+                    adj[e.src].add(e.dst)
+                    adj[e.dst].add(e.src)
+            self._adj, self._adj_sig, self._dist = adj, sig, {}
+        adj = self._adj
+        if (a, b) in self._dist:
+            return self._dist[(a, b)]
+        seen, frontier, dist = {a}, {a}, 99
+        for d in range(1, SLOW_HARM_HOPS + 1):
+            frontier = {n for f in frontier for n in adj[f]} - seen
+            if b in frontier:
+                dist = d
+                break
+            seen |= frontier
+        self._dist[(a, b)] = self._dist[(b, a)] = dist
+        return dist
 
     def _match(self, a: dict, now) -> Incident | None:
         aseg = parse_seg(a["segment"])
@@ -158,18 +251,30 @@ class IncidentManager:
     def _escalate(self, inc: Incident, now, cause: str):
         """An incident first seen through a harmless symptom (e.g. CTR up) is re-judged when harmful symptoms
         of the same root cause join it: the incident is alerted on its net business harm."""
-        if inc.id in self.alerted or inc.label not in ("supported_cause", "hypothesis", "unexplained"):
+        if inc.id in self.alerted or inc.state == "resolved" or inc.id in self.merged                 or inc.label not in ("supported_cause", "hypothesis", "unexplained"):
             return
         case = self.cases.get(inc.id)
-        if case is None or case.notes.get("impact", {}).get("contribution_eur_per_h", 0.0) <= 0:
-            return       # only incidents first judged favourable; harmful ones were already judged on their impact
-        harm = min(0.0, min(a.impact_eur_per_h for a in inc.anomalies))
+        if case is None or case.notes.get("unconfirmed"):
+            return       # amplified noise of a difference metric never escalates
+        if self.mon.features.get("calibrate", True):
+            pass         # v4: incidents first judged favourable OR minor are re-judged when harm joins them
+        elif case.notes.get("impact", {}).get("contribution_eur_per_h", 0.0) <= 0:
+            return       # v3: only incidents first judged favourable
+        new = inc.anomalies[case.notes.get("concluded_with", 0):]   # only symptoms that joined after the verdict
+        if not new:
+            return
+        harm = min(0.0, min(a.impact_eur_per_h for a in new))     # worst single new symptom, never a sum
         if harm <= -ALERT_MIN_EUR_PER_H:
             inc.state = "alerted"
             self.alerted.add(inc.id)
-            worst = min(inc.anomalies, key=lambda a: a.impact_eur_per_h)
+            worst = min(new, key=lambda a: a.impact_eur_per_h)
+            ev = self.inv.record(case, "predict", "escalate", f"anomaly({worst.metric}, {worst.segment or 'total'}, "
+                                 f"{worst.ts})", f"{worst.metric} [{worst.segment or 'total'}] {worst.actual:.4g} vs "
+                                 f"expected {worst.expected:.4g} (z={worst.z:+.1f}), {worst.impact_eur_per_h:+,.0f} EUR/h",
+                                 {"actual": worst.actual, "expected": worst.expected, "z": worst.z},
+                                 signal="escalation", focus=worst.metric, verdict="harmful")
             note = (f"\n\n**Escalated** at {now}: {cause} brought business harm into this incident "
-                    f"({harm:+,.0f} EUR/h; largest: {worst.metric} [{worst.segment or 'total'}]).")
+                    f"({harm:+,.0f} EUR/h; largest: {worst.metric} [{worst.segment or 'total'}], {ev.id}).")
             inc.report_md += note
             self.bus.publish("FINAL_REPORT", "incidents", {"id": inc.id, "kind": "alert", "label": inc.label,
                                                            "first_cause": inc.first_cause, "segment": inc.segment,
@@ -217,6 +322,7 @@ class IncidentManager:
 
     def _after_conclusion(self, inc: Incident, now):
         inc.fingerprint = f"{inc.first_cause}|{inc.segment}"
+        self.cases[inc.id].notes["concluded_with"] = len(inc.anomalies)   # already judged by the investigation
         root = self._root_event(inc.id)
         same_root = [i for i in self.incidents.values() if i.id != inc.id and i.state != "resolved" and root
                      and self._root_event(i.id) == root and compatible(parse_seg(i.segment), parse_seg(inc.segment))]
@@ -230,6 +336,7 @@ class IncidentManager:
             keep.anomalies += inc.anomalies
             self.related[keep.id] |= self.related.get(inc.id, set())
             inc.state = "resolved"
+            self.merged[inc.id] = keep.id
             self.bus.publish("INCIDENT_UPDATED", "incidents", {"id": inc.id, "state": "merged", "merged_into": keep.id,
                 "why": f"same root cause ({root}) and overlapping segment: {inc.first_cause} is another symptom"}, inc.id)
             self._escalate(keep, now, f"merged {inc.id} ({inc.first_cause} [{inc.segment or 'total'}])")
@@ -237,12 +344,31 @@ class IncidentManager:
                 "label": keep.label, "why": f"absorbed {inc.id}; first cause {keep.first_cause}",
                 "report_md": keep.report_md}, keep.id)
             return
+        cooc = self._co_occurring(inc) if self.mon.features.get("calibrate", True) else None
+        if cooc is not None:     # symptoms of one silent fault in the same hour: no release groups them
+            keep, upstream = cooc
+            narrower = (inc.first_cause == keep.first_cause and inc.label == "supported_cause"
+                        and set(parse_seg(keep.segment).items()) < set(parse_seg(inc.segment).items()))
+            if upstream or narrower:   # the new one is the cause, or the same cause localised more precisely
+                keep.first_cause, keep.segment, keep.report_md = inc.first_cause, inc.segment, inc.report_md
+                keep.hypotheses, keep.fingerprint, keep.label = inc.hypotheses, inc.fingerprint, inc.label
+                self.cases[keep.id] = self.cases[inc.id]
+            keep.anomalies += inc.anomalies
+            self.related[keep.id] |= self.related.get(inc.id, set())
+            inc.state = "resolved"
+            self.merged[inc.id] = keep.id
+            self.bus.publish("INCIDENT_UPDATED", "incidents", {"id": inc.id, "state": "merged", "merged_into": keep.id,
+                "why": f"co-occurring symptom: {inc.first_cause} [{inc.segment or 'total'}] and {keep.first_cause} "
+                       f"are linked in the metric graph, opened within the hour, overlapping slices"}, inc.id)
+            self._escalate(keep, now, f"merged {inc.id} ({inc.first_cause} [{inc.segment or 'total'}])")
+            return
         dup = [i for i in self.incidents.values() if i.id != inc.id and i.fingerprint == inc.fingerprint
                and i.state != "resolved"]
         if dup:   # the same problem found again from another symptom: merge, never report twice
             keep = dup[0]
             keep.anomalies += inc.anomalies
             inc.state = "resolved"
+            self.merged[inc.id] = keep.id
             self.related[keep.id] |= self.related.get(inc.id, set())
             self.bus.publish("INCIDENT_UPDATED", "incidents", {"id": inc.id, "state": "merged", "merged_into": keep.id,
                                                                "why": f"same fingerprint {inc.fingerprint}"}, inc.id)
@@ -251,6 +377,19 @@ class IncidentManager:
         impact = abs(signed)
         # alert on business harm only: a favourable change (e.g. a traffic jump) is recorded, not paged
         unconfirmed = self.cases[inc.id].notes.get("unconfirmed", False)
+        host = self._alert_host(inc) if self.mon.features.get("calibrate", True) else None
+        if host is not None and signed <= -ALERT_MIN_EUR_PER_H and not unconfirmed:
+            # a symptom without its own supported cause, in the slice and hour of an incident that has one:
+            # listed with it as possibly related, not paged a second time
+            inc.state = "monitoring"
+            host.anomalies += inc.anomalies
+            self.related[host.id] |= self.related.get(inc.id, set())
+            self.bus.publish("INCIDENT_UPDATED", "incidents", {
+                "id": inc.id, "state": "monitoring", "label": inc.label, "grouped_with": host.id,
+                "why": f"possibly related to {host.id} ({host.first_cause} [{host.segment or 'total'}], supported "
+                       f"cause): same slice and hour, no cause of its own; not paged separately",
+                "report_md": inc.report_md}, inc.id)
+            return
         if inc.label in ("supported_cause", "hypothesis", "unexplained") and signed <= -ALERT_MIN_EUR_PER_H                 and not unconfirmed:
             inc.state = "alerted"
             self.alerted.add(inc.id)

@@ -135,3 +135,20 @@ def test_report_cites_evidence_ids(rt):
     p = next(e for e in rt.bus.of_type("FINAL_REPORT") if e.payload["first_cause"] == "payment_success_rate")
     md = p.payload["report_md"]
     assert "Supported by E" in md and "log-LR" in md
+
+
+# ---------------------------------------------------------------- v4: data profile and calibration
+def test_data_profile_measures_the_data(rt):
+    prof = rt.bus.of_type("DATA_PROFILE")
+    assert prof, "the agent profiles the data before monitoring"
+    p = prof[0].payload
+    assert p["dispersion"] and all(d["phi"] >= 1.0 for d in p["dispersion"].values())
+    assert "pacing_ratio" in p["target_metrics"]                  # spend / planned spend sits at 1
+    assert rt.monitor.calibration["phi"] == {m: d["phi"] for m, d in p["dispersion"].items()}
+
+
+def test_running_campaign_is_not_ended_early(rt):
+    """The spec's campaign lasts 24 h; on day one its effect is still measurable, so it is not ended."""
+    camp = next(e for e in rt.data.events(pd.Timestamp("2026-10-26"), rt.data.now) if e.type == "campaign")
+    assert rt.monitor.planned_end(camp) is None
+    assert not rt.bus.of_type("PLANNED_EFFECT_ENDED")

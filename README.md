@@ -97,3 +97,23 @@ python -m venv .venv-eye && .venv-eye/Scripts/python -m pip install -r requireme
 
 On Windows, pgserver ships without a timezone database. Eye's `db.connect` needs
 `set time zone interval '+00:00' hour to minute` instead of `'UTC'`.
+
+### Compatibility with jacob/v1 at b8e7f83 (agent v4)
+
+Eye now evaluates a rolling one-hour window every five minutes and publishes each hour progressively.
+The adapter follows these changes:
+
+- **Hourly series (A1):** the agent reads only the hour-aligned observation windows (`window_start` on
+  the hour). The overlapping five-minute windows are never read as extra hours or summed.
+- **No lookahead (A2):** every event query (activity mix, sample events, process metrics) only counts
+  events ingested by the hour's end + 15 minutes, which is the same cutoff Eye uses (`GRACE`).
+- **Final hours (A3):** an hour is final only once Eye has published it through its end + 15 minutes
+  (`published_through` / `observation_snapshot`). Until then the agent's clock does not include it, and
+  `completeness()` returns 0.
+- **Measured releases (A4):** Eye logs no change calendar, but every event carries the release that
+  served it (`search_release`, `checkout_release_version`). A version seen for the first time is a
+  release:
+  - with experiment arms, the rollout arm's version is the release;
+  - the scope is every dimension that stays constant across that version's events.
+
+  The investigator can then test release hypotheses on Eye data (timing, scope, control).

@@ -33,9 +33,28 @@ def render_report(g, case, best, impact: dict) -> str:
                      + (f" Supported by {', '.join(cites)}." if cites else ""))
     if impact.get("hours"):
         lab = impact.get("money_label", "contribution")
-        lines.append(f"**Business impact:** {impact['orders_delta']:+,.0f} orders, GMV {impact['gmv_delta_eur']:+,.0f} EUR, "
-                     f"{lab} {impact['contribution_eur_total']:+,.0f} EUR over {impact['hours']} h "
-                     f"({impact['contribution_eur_per_h']:+,.0f} EUR/h; {lab} is {impact['margin']:.1%} of GMV).")
+        if impact.get("money_from") == "propagation":
+            how = (f"{lab} estimated from the first cause's own deviation through the formula graph; the "
+                   "segment's GMV and orders may also move for other reasons")
+        else:
+            how = f"{lab} = GMV change x {lab}/GMV ({impact['margin']:.1%})"
+        lines.append(f"**Business impact (estimate):** orders {impact['orders_delta']:+,.0f}, GMV "
+                     f"{impact['gmv_delta_eur']:+,.0f} EUR in the segment; {lab} {impact['contribution_eur_total']:+,.0f} "
+                     f"EUR over {impact['hours']} h ({impact['contribution_eur_per_h']:+,.0f} EUR/h; {how}).")
+    fr = case.notes.get("frame")
+    if fr:
+        lines += ["", "### Problem framing (from the text)",
+                  f"- **Text:** {fr['text'][:400]}" + ("…" if len(fr["text"]) > 400 else "")]
+        if fr.get("summary"):
+            lines.append(f"- **Understood as:** {fr['summary']}")
+        for ck in fr.get("checks", []):
+            lines.append(f"- symptom '{ck['phrase']}' -> `{ck['metric_id']}` [{seg_key(ck.get('segment') or {}) or 'total'}]: "
+                         + ("**confirmed** " if ck.get("confirmed") else "not confirmed ") + f"({ck.get('why', '')})")
+        for d in fr.get("dropped", []):
+            lines.append(f"- not used: {d}")
+        if fr.get("noise"):
+            lines.append("- ignored as noise: " + "; ".join(fr["noise"]))
+        lines.append("- The text frames the question; every conclusion below rests on the data.")
     walk = case.notes.get("walk") or {}
     if walk.get("visited"):
         lines += ["", "### Graph walk (pruned BFS)"]
@@ -45,6 +64,12 @@ def render_report(g, case, best, impact: dict) -> str:
         lines.append(f"- first-cause chain: {' <- '.join(case.chain)}")
         if walk.get("secondary"):
             lines.append(f"- other anomalous branches (secondary candidates): {', '.join(walk['secondary'])}")
+    th = impact.get("target_harm")
+    if th:
+        lines.append(f"**Target deviation:** {th['metric']} [{th['segment']}] {th['actual']:.2f} vs expected "
+                     f"{th['expected']:.2f}: {th['eur_total']:,.0f} EUR off plan ({th['eur_per_h']:,.0f} EUR/h). "
+                     "A target metric is harmful in either direction (e.g. an advertiser overspending), so this "
+                     "counts as harm even where the marketplace earns more.")
     lines += ["", "### Evidence"]
     for e in case.evidence:
         tag = f"{e.step}" + (f"/{e.signal}" if e.signal and e.signal != e.step else "")

@@ -126,7 +126,7 @@ class EvidenceLink(BaseModel):
 class Hypothesis(BaseModel):
     id: str
     statement: str
-    source: Literal["causal_edge", "event", "llm"]
+    source: Literal["causal_edge", "event", "llm", "premise"]   # premise: a cause the operator's text claims
     predictions: list[str]
     prior: float
     posterior: float

@@ -9,7 +9,7 @@ Skipped when the Eye checkout (.eye-jacob) or its dependencies (pgserver, pm4py,
 from __future__ import annotations
 
 import warnings
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -47,6 +47,17 @@ def eye_db(tmp_path_factory):
             t = hist_end + timedelta(hours=h)
             simulator.emit(db, t, fault=True)
             monitor.materialize(db, window_start=t)
+        # Eye's live runtime: a rolling one-hour window evaluated every five minutes (jacob/v1 b8e7f83)
+        from eye.db import state
+        baseline = datetime.fromisoformat(state(db, "baseline_through"))
+        for k in (1, 2):
+            monitor.materialize_rolling(db, hist_end + k * timedelta(minutes=5), baseline)
+        # third live hour: Eye's faster-search rollout (an experiment: rollout vs holdout arm)
+        from eye.scenario import Scenario
+        t = hist_end + timedelta(hours=2)
+        simulator.emit(db, t, scenarios=(Scenario(effect="search_rollout", transition="search", severity=.82,
+                                                  duration_hours=1),))
+        monitor.materialize(db, window_start=t)
     yield dsn, pd.Timestamp(hist_end).tz_convert("UTC").tz_localize(None)
     server.cleanup()
 
@@ -64,7 +75,8 @@ def test_adapter_totals_match_observations(data, eye_db):
     df = data.metric("sessions", start, end)
     assert len(df) == 24 and df.complete.all()
     raw = data.db.execute("""select sum(value) as v from observations where metric_id = 'sessions'
-                             and scope = '{}' and window_start >= %s and window_start < %s""",
+                             and scope = '{}' and window_start >= %s and window_start < %s
+                             and window_start = date_trunc('hour', window_start)""",
                           (start.tz_localize("UTC").to_pydatetime(), end.tz_localize("UTC").to_pydatetime())).fetchone()
     assert df.value.sum() == pytest.approx(raw["v"])
 
@@ -109,6 +121,48 @@ def test_adapter_completeness_and_virtual_ratio(data, eye_db):
     c = data.metric("checkout_sessions", live - timedelta(hours=5), live, group_by=["country"])
     s = data.metric("sessions", live - timedelta(hours=5), live, group_by=["country"])
     assert v.value.sum() == pytest.approx((c.value.values / s.value.values).sum())
+
+
+# ====================================================================== 1b. jacob/v1 b8e7f83 compatibility
+def test_rolling_windows_are_not_read_as_hours(data, eye_db):
+    """A1: Eye writes a rolling one-hour observation every five minutes; the agent's hourly series must
+    contain each hour once, with the hour-aligned value."""
+    _, live = eye_db
+    aware = lambda t: t.tz_localize("UTC").to_pydatetime()  # noqa: E731
+    rolling = data.db.execute("""select count(*) as n from observations where metric_id = 'sessions' and scope = '{}'
+                                 and window_start > %s and window_start < %s""",
+                              (aware(live), aware(live + timedelta(hours=1)))).fetchone()["n"]
+    assert rolling >= 2                                   # the five-minute windows exist in Eye's table
+    df = data.metric("sessions", live, live + timedelta(hours=2))
+    assert list(df.ts) == [live, live + timedelta(hours=1)]
+    hourly = data.db.execute("""select value from observations where metric_id = 'sessions' and scope = '{}'
+                                and window_start = %s""", (aware(live),)).fetchone()["value"]
+    assert df.value.iloc[0] == pytest.approx(hourly)
+
+
+def test_event_evidence_respects_ingestion_cutoff(data, eye_db):
+    """A2: event-level evidence only counts events Eye could have seen (ingested by the hour's end + GRACE)."""
+    _, live = eye_db
+    aware = lambda t: t.tz_localize("UTC").to_pydatetime()  # noqa: E731
+    assert data.as_of() <= aware(data.published_cutoff())
+    mix = data.activity_mix(live, live + timedelta(hours=1), {}, ["payment_attempted", "payment_succeeded"])
+    raw = {r["activity"]: r["n"] for r in data.db.execute(
+        """select activity, count(*) as n from events where activity = any(%s) and occurred_at >= %s
+           and occurred_at < %s and ingested_at <= %s group by activity""",
+        (["payment_attempted", "payment_succeeded"], aware(live), aware(live + timedelta(hours=1)), data.as_of()))}
+    assert {m["activity"]: m["now"] for m in mix} == {k: raw.get(k, 0) for k in ("payment_attempted", "payment_succeeded")}
+
+
+def test_release_measured_from_event_versions(data, eye_db):
+    """A4: the search rollout is found as a release from the events' version field, at the right hour."""
+    _, live = eye_db
+    t = live + timedelta(hours=2)
+    evs = data.events(t - timedelta(hours=1), t + timedelta(hours=1))
+    rel = [e for e in evs if e.service == "search"]
+    assert len(rel) == 1 and rel[0].type == "release" and "search-v2" in rel[0].description
+    assert t <= pd.Timestamp(rel[0].ts) < t + timedelta(hours=1)
+    assert data.events(live - timedelta(hours=6), live) == [] or all(e.service != "search" for e in
+                                                                     data.events(live - timedelta(hours=6), live))
 
 
 # ====================================================================== 2. PM4Py-derived formulas
@@ -279,3 +333,25 @@ def test_investigation_persisted_in_agent_tables(agent, data, eye_db):
     n_bus = data.db.execute("select count(*) as n from sentinel.bus_events").fetchone()["n"]
     assert n_ev > 3 and n_bus > n_ev
     assert eye_counts(data.db) == agent["before"]                       # still nothing written to eye.*
+
+
+# ====================================================================== last: progressive publication (A3)
+def test_unpublished_hour_is_not_final(eye_db):
+    """A3: Eye publishes a live hour progressively (published_through); until it is published through its
+    end + GRACE the hour is not final: not in the agent's clock, completeness 0."""
+    import_eye(EYE)
+    from eye import simulator
+    dsn, live = eye_db
+    d = EyeData(dsn, EYE)
+    final_end = d.last_window_end()
+    t = final_end
+    aware_t = t.tz_localize("UTC").to_pydatetime()
+    simulator.emit(d.db, aware_t, staged=True)
+    simulator.publish_through(d.db, aware_t, aware_t + timedelta(minutes=30))   # half the hour published
+    d2 = EyeData(dsn, EYE)
+    assert d2.last_window_end() == final_end
+    d2.now = t + timedelta(hours=1)                         # even if a caller pushes the clock forward
+    assert d2.completeness("payments", t) == 0.0
+    simulator.publish_through(d.db, aware_t, aware_t + timedelta(hours=1, minutes=15))
+    d3 = EyeData(dsn, EYE)
+    assert d3.last_window_end() == t + timedelta(hours=1)

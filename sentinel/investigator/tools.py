@@ -47,7 +47,7 @@ class Toolbox:
 
     def window_dev(self, metric: str, seg: dict, start, end) -> dict:
         df = self.data.metric(metric, start, end, filters=seg)
-        comp = df[df.complete]
+        comp = df[df.complete.astype(bool)]        # an empty object column would select columns, not rows
         b = self.mon.baseline(metric, seg)
         w = b.window(comp, factor_fn=lambda t: self.mon.planned_factor(metric, seg, pd.Timestamp(t))[0])
         w.update({"metric": metric, "segment": seg_key(seg), "incomplete_hours": int((~df.complete).sum())})
@@ -157,6 +157,7 @@ class Toolbox:
                     t, p = stats.ttest_ind(focus.rel, sib_vals, equal_var=False)
                 if np.isfinite(t):
                     res.update({"t": float(t), "p": float(p)})
+                    res["significant"] = bool(p < 0.05)   # reported; the decision stays on magnitude
         return res
 
     # ------------------------------------------------------------------ causal

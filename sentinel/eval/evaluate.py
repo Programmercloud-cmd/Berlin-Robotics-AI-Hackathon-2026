@@ -49,9 +49,15 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "state" / "eval"
 LIVE = pd.Timestamp("2026-10-26")
-CONFIGS = {"v1": {"scan": False, "riskloc": False, "process": False, "learning": False, "bfs": False},
-           "v2": {"scan": True, "riskloc": True, "process": True, "learning": True, "bfs": False},
-           "v3": {"scan": True, "riskloc": True, "process": True, "learning": True, "bfs": True}}
+CONFIGS = {"v1": {"scan": False, "riskloc": False, "process": False, "learning": False, "bfs": False,
+                  "calibrate": False},
+           "v2": {"scan": True, "riskloc": True, "process": True, "learning": True, "bfs": False, "calibrate": False},
+           "v3": {"scan": True, "riskloc": True, "process": True, "learning": True, "bfs": True, "calibrate": False},
+           # v3's investigator changes (pruned BFS) on the v1 monitor: isolates the BFS effect without v2
+           "v1+bfs": {"scan": False, "riskloc": False, "process": False, "learning": False, "bfs": True,
+                      "calibrate": False},
+           # v4: v3 + data profile and calibration (dispersion, planned-effect end, target harm, slow harm)
+           "v4": {"scan": True, "riskloc": True, "process": True, "learning": True, "bfs": True, "calibrate": True}}
 DEFAULT_SCENARIOS = ["autumn_campaign", "late_partition", "android_payment_de", "ios_release", "for_you_model_shift"]
 
 
@@ -70,6 +76,20 @@ SUITE = [
      "overrides": payment("es", "web", "2026-10-26T18:00", "2026-10-26T23:00", "2026.10.26")},
 ]
 
+# The same faults on Chaimaa's Shoply simulator (branch chaimaa): all 7 spec scenarios, incl. the two silent
+# faults without any logged event (search_relevance_de, pacing_bug) and ~2 harmless background releases a
+# day as red herrings. Runs until 10-28 08:00 so that pacing_bug (10-28 00:00) is inside the window.
+SHOPLY_SCENARIOS = DEFAULT_SCENARIOS + ["search_relevance_de", "pacing_bug"]
+SHOPLY_UNTIL = "2026-10-28T08:00"
+SHOPLY_SUITE = [
+    {"name": "shoply-de-android", "data": "shoply", "seed": 42, "overrides": {}, "scenarios": SHOPLY_SCENARIOS},
+    {"name": "shoply-fr-ios", "data": "shoply", "seed": 7, "scenarios": SHOPLY_SCENARIOS,
+     "overrides": payment("fr", "ios", "2026-10-26T11:00", "2026-10-26T16:00", "6.1")},
+    {"name": "shoply-es-web", "data": "shoply", "seed": 11, "scenarios": SHOPLY_SCENARIOS,
+     "overrides": payment("es", "web", "2026-10-26T18:00", "2026-10-26T23:00", "2026.10.26")},
+]
+SUITES = {"fake": SUITE, "shoply": SHOPLY_SUITE}
+
 # accepted first causes and the true propagation path per fault scenario
 TRUTH = {
     "android_payment_de": {"metrics": {"payment_success_rate"}, "path": ["orders", "conversion_rate", "payment_success_rate"],
@@ -80,7 +100,19 @@ TRUTH = {
     "supplier_delay_electronics": {"metrics": {"in_stock_rate", "add_to_cart_rate", "feed_purchase_rate"},
                                    "path": ["add_to_cart_rate", "in_stock_rate"], "label": None,
                                    "scope": {"category": "electronics"}},
+    # silent faults (Shoply): no event is logged, so no label is prescribed; finding the metric and scope counts
+    "search_relevance_de": {"metrics": {"search_relevance", "search_ctr"}, "path": ["search_ctr", "search_relevance"],
+                            "label": None, "scope": {"country": "de"}},
+    "pacing_bug": {"metrics": {"pacing_ratio", "ad_revenue", "sponsored_clicks", "avg_cpc"},
+                   "path": ["ad_revenue", "pacing_ratio"], "label": None, "scope": {"advertiser": "adv_017"}},
 }
+
+
+def _sd(s) -> dict:
+    """A scenario as a dict: dev/fake_data keeps dicts, Shoply keeps dataclasses."""
+    if isinstance(s, dict):
+        return s
+    return {"start": s.start, "end": s.end, "scope": dict(s.scope or {})}
 
 
 def ts(x) -> pd.Timestamp:
@@ -102,14 +134,14 @@ def ground_truth(rt, until) -> dict:
     for sid, t in TRUTH.items():
         if sid not in rt.data.active:
             continue
-        s = sc[sid]
+        s = _sd(sc[sid])
         start = max(ts(s["start"]), LIVE)
         end = ts(s["end"]) if s.get("end") else until
         if start >= until:
             continue
         scope = t.get("scope") or {k: str(v) for k, v in (s.get("scope") or {}).items()}
         faults.append({"id": sid, "start": start, "end": end, "scope": scope, **t})
-    camp = sc["autumn_campaign"]
+    camp = _sd(sc["autumn_campaign"])
     return {"faults": faults, "innocent": (ts(camp["start"]), ts(camp["end"])), "hours": int((until - LIVE) / pd.Timedelta(hours=1))}
 
 
@@ -218,8 +250,10 @@ def _v3_metrics(rt, bus, investigated) -> dict:
 
 def run_one(item: dict, config: str, until: pd.Timestamp) -> dict:
     from sentinel.run import Runtime
+    out = Path(item.get("out", OUT))
     args = SimpleNamespace(no_meta=False, seed=item["seed"], overrides=item["overrides"], scenarios=item["scenarios"],
-                           features=CONFIGS[config], events_path=str(OUT / f"events_{item['name']}_{config}.jsonl"))
+                           features=CONFIGS[config], data=item.get("data", "fake"),
+                           events_path=str(out / f"events_{item['name']}_{config}.jsonl"))
     t0 = time.time()
     rt = Runtime(args)
     t1 = time.time()
@@ -301,12 +335,17 @@ def main(argv=None):
     p.add_argument("--configs", default="v1,v2,v3")
     p.add_argument("--in-process", action="store_true", help="run everything in this process (more memory)")
     p.add_argument("--resume", action="store_true", help="keep finished runs from results.json")
+    p.add_argument("--suite", choices=sorted(SUITES), default="fake",
+                   help="fake: dev/fake_data.py; shoply: Chaimaa's Shoply simulator (needs .shoply-chaimaa)")
     a = p.parse_args(argv)
-    OUT.mkdir(parents=True, exist_ok=True)
-    suite = SUITE[:1] if a.quick else SUITE
+    out = OUT if a.suite == "fake" else OUT / a.suite
+    out.mkdir(parents=True, exist_ok=True)
+    until = a.until if a.suite == "fake" or "--until" in (argv or sys.argv) else SHOPLY_UNTIL
+    suite = [{**item, "out": str(out)} for item in SUITES[a.suite]]
+    suite = suite[:1] if a.quick else suite
     rows = []
-    if a.resume and (OUT / "results.json").exists():
-        rows = json.loads((OUT / "results.json").read_text(encoding="utf-8"))
+    if a.resume and (out / "results.json").exists():
+        rows = json.loads((out / "results.json").read_text(encoding="utf-8"))
     done = {(r["run"], r["config"]) for r in rows}
     runner = run_one if a.in_process else run_isolated
     for item in suite:
@@ -315,16 +354,17 @@ def main(argv=None):
                 print(f"run {item['name']} [{cfg}]: kept from results.json", flush=True)
                 continue
             print(f"run {item['name']} [{cfg}] …", flush=True)
-            r = runner(item, cfg, pd.Timestamp(a.until))
+            r = runner(item, cfg, pd.Timestamp(until))
             rows.append(r)
             print("   " + ", ".join(f"{k}={fmt(k, r.get(k))}" for k in KEYS[:9]), flush=True)
-            (OUT / "results.json").write_text(json.dumps(rows, indent=1, default=str), encoding="utf-8")
+            (out / "results.json").write_text(json.dumps(rows, indent=1, default=str), encoding="utf-8")
     agg = aggregate(rows)
-    lines = ["| metric | " + " | ".join(CONFIGS) + " |", "|---|" + "---|" * len(CONFIGS)]
+    cfgs = [c for c in CONFIGS if any(r["config"] == c for r in rows)]
+    lines = ["| metric | " + " | ".join(cfgs) + " |", "|---|" + "---|" * len(cfgs)]
     for k in KEYS:
-        lines.append(f"| {k} | " + " | ".join(fmt(k, agg[c][k]) for c in CONFIGS) + " |")
+        lines.append(f"| {k} | " + " | ".join(fmt(k, agg[c][k]) for c in cfgs) + " |")
     table = "\n".join(lines)
-    (OUT / "summary.md").write_text(table + "\n", encoding="utf-8")
+    (out / "summary.md").write_text(table + "\n", encoding="utf-8")
     print(table)
 
 

@@ -36,7 +36,7 @@ from sentinel.brain.validate import local_profile_key
 RISK_THRESHOLD, PEP_THRESHOLD, RESIDUAL_STOP, MAX_CAUSES, MIN_Z, MIN_LIFT = 0.5, 0.02, 0.10, 3, 3.0, 1.3
 
 
-def riskloc(leaves: pd.DataFrame, dims: list[str], max_layer: int = 3) -> dict:
+def riskloc(leaves: pd.DataFrame, dims: list[str], max_layer: int = 3, phi: float = 1.0) -> dict:
     """leaves: one row per leaf with columns dims + ['v', 'f']. Returns {direction, causes, ...}."""
     df = leaves.dropna(subset=["v", "f"]).copy()
     df = df[(df.v + df.f) > 0]
@@ -47,7 +47,8 @@ def riskloc(leaves: pd.DataFrame, dims: list[str], max_layer: int = 3) -> dict:
         return {"causes": [], "reason": "no aggregate deviation"}
     sign = 1.0 if total_dev > 0 else -1.0          # +1: actual below forecast (a drop)
     df["dev"] = sign * (df.f - df.v)               # oriented deviation amount
-    df["d"] = sign * (df.f - df.v) / np.sqrt(df.f.clip(lower=1.0))
+    phi = max(float(phi), 1.0)          # measured overdispersion (calibration); 1 = Poisson
+    df["d"] = sign * (df.f - df.v) / np.sqrt(phi * df.f.clip(lower=1.0))
     t = max(0.0, -float(df.d.min()))
     df["w"] = df.d - t
     original = float(df.dev.sum())
@@ -70,7 +71,7 @@ def riskloc(leaves: pd.DataFrame, dims: list[str], max_layer: int = 3) -> dict:
                 rest_f = (float(remaining.f.sum()) - g.f.sum()).clip(lower=1e-9)
                 rel_out = rest_dev / rest_f                              # ... and in everything else
                 # null hypothesis: the element changed like everything else (not: did not change at all)
-                z = (g.dev.sum() - g.f.sum() * rel_out.clip(lower=0)) / np.sqrt(g.f.sum().clip(lower=1.0))
+                z = (g.dev.sum() - g.f.sum() * rel_out.clip(lower=0)) / np.sqrt(phi * g.f.sum().clip(lower=1.0))
                 for key in pos.index:
                     r = float(pos[key] / tot[key]) if tot[key] > 0 else 0.0
                     e = float(ep[key])
@@ -121,6 +122,13 @@ class LeafForecaster:
             agg = h.groupby(list(dims) + ["k"]).agg(num=("numerator", "mean"), den=("denominator", "mean"),
                                                     val=("value", "mean"), sd=("value", "std"),
                                                     n=("value", "size")).reset_index()
+            # an hour key without history (weekend hour after weekday-only history) borrows the same local
+            # hour of the other day type
+            if not agg.empty:
+                cols = list(dims) + ["k"]
+                other = agg.assign(k=agg.k.str[:-2] + agg.k.str[-2:].map({"wd": "we", "we": "wd"}))
+                m = other.merge(agg[cols], on=cols, how="left", indicator=True)   # vectorised anti-join
+                agg = pd.concat([agg, other[(m["_merge"] == "left_only").values]], ignore_index=True)
             self.tables[key] = agg
         return self.tables[key]
 

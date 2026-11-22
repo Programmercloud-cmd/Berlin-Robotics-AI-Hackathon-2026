@@ -53,7 +53,8 @@ def start_database(pg_dir: Path, eye_path: Path, history_days: int, log):
 class EyeRuntime:
     finished = False
 
-    def __init__(self, dsn: str, eye_path: Path, no_meta: bool = False):
+    def __init__(self, dsn: str, eye_path: Path, no_meta: bool = False, events_path: str = "state/events_eye.jsonl",
+                 features: dict | None = None):
         from sentinel.adapters.eye import EyeData, build_graph
         from sentinel.brain.validate import validate_graph
         from sentinel.bus import EventBus
@@ -64,7 +65,7 @@ class EyeRuntime:
 
         self.data = EyeData(dsn, eye_path)
         live_start = self.data.now
-        self.bus = EventBus("state/events_eye.jsonl")
+        self.bus = EventBus(events_path)
         self.bus.sim_ts = str(live_start)
         self.bus.publish("SYSTEM", "runtime", {"message": "Sentinel on Eye: building the metric graph from Eye's catalog"})
         self.graph = build_graph(self.data)
@@ -85,8 +86,11 @@ class EyeRuntime:
         self.store = AgentStore(self.data.db)
         self.engine = AgentMetricsEngine(self.data, self.store)
         add_process_metrics(self.graph, self.data, self.store, self.engine, self.bus, first, live_start)
-        self.monitor = MonitorEngine(self.graph, self.data, self.bus, first, live_start)
+        self.monitor = MonitorEngine(self.graph, self.data, self.bus, first, live_start, features=features)
         self.monitor.fit()
+        if self.monitor.features.get("calibrate", True):      # 0. study the data before trusting defaults
+            from sentinel.calibrate import DataProfile
+            self.profile = DataProfile(self.graph, self.data, self.monitor, self.bus).run()
         self.meta = None if no_meta else MetaAgent(self.graph, self.data, self.monitor, self.bus)
         if self.meta is not None:   # step 4: activities of the process map that no metric measures yet
             self.meta.mine_unmeasured_activities(self.engine, self.store, live_start, first)

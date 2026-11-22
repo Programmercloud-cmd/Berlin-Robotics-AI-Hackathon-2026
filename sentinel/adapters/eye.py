@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import sys
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +27,13 @@ import pandas as pd
 
 from sentinel.brain.graph import BrainGraph
 from sentinel.contracts import Event, MetricNode
+
+RELEASE_SCOPE_DIMS = ("country", "platform", "payment_provider", "acquisition_channel")
+GRACE = timedelta(minutes=15)      # Eye: an hour is observed 15 minutes after it ends (eye.intervals.GRACE)
+# Eye evaluates a rolling one-hour window every five minutes (window_start at :00, :05, ...). The agent
+# works on hourly series, so it reads the hour-aligned windows only: overlapping rolling windows must not
+# be treated as separate hours or summed.
+HOURLY = "window_start = date_trunc('hour', window_start)"
 
 ADDITIVE_UNITS = {"count", "units", "EUR cents"}
 RATIO_UNITS = {"ratio", "EUR cents per click", "seconds per attempt"}
@@ -45,6 +52,12 @@ def import_eye(eye_path: str | Path):
     warnings.filterwarnings("ignore")
     import eye  # noqa: F401
     return eye
+
+
+def _empty(cols) -> pd.DataFrame:
+    """An empty metric frame with real dtypes (a bool `complete` column filters rows, never columns)."""
+    return pd.DataFrame({c: pd.Series(dtype=bool if c == "complete" else float if c in
+                                      ("value", "numerator", "denominator") else object) for c in cols})
 
 
 def _naive(ts) -> pd.Timestamp:
@@ -78,9 +91,27 @@ class EyeData:
         self.virtual[vid] = (numerator, denominator)
 
     # ------------------------------------------------------------------ clock
+    def published_cutoff(self) -> pd.Timestamp | None:
+        """Ingestion time up to which Eye has published events (windows are published progressively,
+        every five minutes; an hour is final once published through its end + GRACE)."""
+        row = self.db.execute(
+            """select max(coalesce(published_through, observation_snapshot, end_at + interval '15 minutes')) as t
+               from windows""").fetchone()
+        return _naive(row["t"]) if row and row["t"] else None
+
     def last_window_end(self) -> pd.Timestamp:
-        row = self.db.execute("select max(end_at) as t from windows").fetchone()
-        return _naive(row["t"]) if row and row["t"] else pd.Timestamp("2026-11-21 09:00")
+        """End of the last hour whose observation is final (published through end + GRACE)."""
+        cut = self.published_cutoff()
+        if cut is None:
+            return pd.Timestamp("2026-11-21 09:00")
+        return (cut - GRACE).floor("h")
+
+    def as_of(self) -> datetime:
+        """Ingestion cutoff for event queries: what Eye itself could see for the agent's current hour (no
+        lookahead into receipts that arrive later), bounded by what has been published."""
+        t = self.now + GRACE
+        cut = self.published_cutoff()
+        return _aware(min(t, cut) if cut is not None else t)
 
     def registered(self) -> list[dict]:
         return self.db.execute("select * from metrics order by id").fetchall()
@@ -104,12 +135,31 @@ class EyeData:
         d = self.agent.get(metric_id) or self.catalog.get(metric_id, {})
         return d.get("access", {}).get("unit", "count")
 
+    def rolling_metric(self, id: str, window_start, filters: dict | None = None,
+                       group_by: list | None = None) -> pd.DataFrame:
+        """One of Eye's rolling one-hour windows (evaluated every five minutes), in metric() format with
+        ts = window start. Used by the monitor's early-warning pass; hourly series never include these."""
+        self._rolling = _naive(window_start)
+        try:
+            return self.metric(id, self._rolling, self._rolling + timedelta(minutes=1), filters, group_by)
+        finally:
+            self._rolling = None
+
     def _rows(self, metric_id: str, start, end) -> pd.DataFrame:
+        rolling = getattr(self, "_rolling", None)
+        if rolling is not None:
+            key = (metric_id, "rolling", str(rolling), str(self.now))
+            if key not in self._cache:
+                rows = self.db.execute(
+                    f"""select window_start, scope, value, sample_size, details from {self._table(metric_id)}
+                       where metric_id = %s and window_start = %s""", (metric_id, _aware(rolling))).fetchall()
+                self._cache[key] = pd.DataFrame(rows)
+            return self._cache[key]
         key = (metric_id, str(start), str(end), str(self.now))
         if key not in self._cache:
             rows = self.db.execute(
                 f"""select window_start, scope, value, sample_size, details from {self._table(metric_id)}
-                   where metric_id = %s and window_start >= %s and window_start < %s""",
+                   where metric_id = %s and window_start >= %s and window_start < %s and {HOURLY}""",
                 (metric_id, _aware(start), _aware(min(_naive(end), self.now))),
             ).fetchall()
             self._cache = {k: v for k, v in self._cache.items() if k[3] == str(self.now)}
@@ -120,7 +170,7 @@ class EyeData:
         if metric_id not in self._keysets:
             rows = self.db.execute(
                 f"""select distinct array(select jsonb_object_keys(scope) order by 1) as k
-                   from {self._table(metric_id)} where metric_id = %s""", (metric_id,)).fetchall()
+                   from {self._table(metric_id)} where metric_id = %s and {HOURLY}""", (metric_id,)).fetchall()
             self._keysets[metric_id] = sorted({frozenset(r["k"]) for r in rows}, key=len)
         return self._keysets[metric_id]
 
@@ -140,7 +190,7 @@ class EyeData:
         cols = ["ts"] + group_by + ["value", "numerator", "denominator", "complete"]
         df = self._rows(id, start, end)
         if df.empty:
-            return pd.DataFrame(columns=cols)
+            return _empty(cols)
         unit = self._unit(id)
         additive = unit in ADDITIVE_UNITS or unit in RATIO_UNITS
         usable = [k for k in self.keysets(id) if k >= need and (k == need or additive)]
@@ -151,7 +201,7 @@ class EyeData:
         for k, v in filters.items():
             d = d[d.scope.map(lambda s, k=k, v=v: str(s.get(k)) == str(v))]
         if d.empty:
-            return pd.DataFrame(columns=cols)
+            return _empty(cols)
         for g in group_by:
             d[g] = d.scope.map(lambda s, g=g: str(s.get(g)))
         d["ts"] = d.window_start.map(_naive)
@@ -181,6 +231,9 @@ class EyeData:
         t = _naive(ts)
         if t >= self.now:
             return 0.0
+        cut = self.published_cutoff()
+        if cut is not None and t + timedelta(hours=1) + GRACE > cut:
+            return 0.0          # the hour is not yet published through its end + GRACE: not final
         rows = self.db.execute(
             """select scope, value from observations where metric_id = 'data_completeness_ratio'
                and window_start = %s""", (_aware(t),)).fetchall()
@@ -192,8 +245,51 @@ class EyeData:
         v = by_source.get(table, total)
         return float(v) if v is not None else 0.0
 
+    def release_fields(self) -> list[str]:
+        """Event attributes that carry a release version (search_release, checkout_release_version, ...)."""
+        if getattr(self, "_release_fields", None) is None:
+            self._release_fields = sorted(r["k"] for r in self.db.execute(
+                "select distinct jsonb_object_keys(attrs) as k from events") if "release" in r["k"])
+        return self._release_fields
+
     def events(self, start, end, services=None) -> list[Event]:
-        return []   # Eye publishes no release / campaign context yet; the agent works from observations
+        """Releases measured from the events themselves: Eye logs no change calendar, but every event carries
+        the release version that served it. A version value seen for the first time is a release; when
+        the events carry experiment arms, the rollout arm's version is the release (the holdout keeps the
+        old behaviour). The scope is every dimension that is constant across that version's events."""
+        s, e = _naive(start), min(_naive(end), self.now)
+        if e <= s:
+            return []
+        asof, out = self.as_of(), []
+        for key in self.release_fields():
+            service = key.replace("_release_version", "").replace("_release", "")
+            if services and service not in services:
+                continue
+            rows = self.db.execute(
+                """select attrs->>%s as v, min(occurred_at) as first, count(*) as n,
+                          count(*) filter (where attrs->>'experiment_arm' = 'rollout') as rollout
+                   from events where attrs ? %s and ingested_at <= %s and occurred_at < %s group by 1""",
+                (key, key, asof, _aware(e))).fetchall()
+            total = sum(r["n"] for r in rows) or 1
+            new = [r for r in rows if r["v"] and s <= _naive(r["first"]) < e]
+            picks = [r for r in new if r["rollout"]] or new
+            for r in picks:
+                sample = [x["attrs"] for x in self.db.execute(
+                    """select attrs from events where attrs->>%s = %s and ingested_at <= %s
+                       order by occurred_at limit 500""", (key, r["v"], asof))]
+                scope = {}
+                for d in RELEASE_SCOPE_DIMS:
+                    vals = {a.get(d) for a in sample}
+                    if len(vals) == 1 and None not in vals:
+                        scope[d] = str(next(iter(vals)))
+                first = _naive(r["first"])
+                arm = ", rollout arm of an experiment" if r["rollout"] else ""
+                out.append(Event(
+                    id=f"eye_release:{key}:{r['v']}", ts=first.to_pydatetime(), type="release", service=service,
+                    scope=scope, planned=False,
+                    description=f"{r['v']} rollout (first served {first:%H:%M}; {r['n'] / total:.0%} of {key} "
+                                f"events{arm})"))
+        return sorted(out, key=lambda ev: ev.ts)
 
     def schema(self) -> dict:
         out = defaultdict(lambda: {"dimensions": [], "measures": []})
@@ -262,25 +358,35 @@ class EyeData:
     def activity_mix(self, start, end, scope: dict, activities: list[str], baseline_days: int = 7) -> list[dict]:
         """Counts per activity inside the segment, now vs the same hours on previous days."""
         s, e = _naive(start), min(_naive(end), self.now)
+        asof = _naive(self.as_of())
         cur = {r["activity"]: r["n"] for r in self.db.execute(
             """select activity, count(*) as n from events where activity = any(%s) and attrs @> %s
-               and occurred_at >= %s and occurred_at < %s group by activity""",
-            (activities, json.dumps(scope), _aware(s), _aware(e)))}
-        past = defaultdict(float)
-        for d in range(1, baseline_days + 1):
+               and occurred_at >= %s and occurred_at < %s and ingested_at <= %s group by activity""",
+            (activities, json.dumps(scope), _aware(s), _aware(e), _aware(asof)))}
+        past, days = defaultdict(float), 0
+        for d in range(1, baseline_days + 1):     # same ingestion maturity on the reference days
+            if not self.db.execute("select 1 from windows where start_at >= %s and start_at < %s limit 1",
+                                   (_aware(s - timedelta(days=d)), _aware(e - timedelta(days=d)))).fetchone():
+                continue                          # no data that day: it must not count as a day with zero events
+            days += 1
             for r in self.db.execute(
                     """select activity, count(*) as n from events where activity = any(%s) and attrs @> %s
-                       and occurred_at >= %s and occurred_at < %s group by activity""",
-                    (activities, json.dumps(scope), _aware(s - timedelta(days=d)), _aware(e - timedelta(days=d)))):
-                past[r["activity"]] += r["n"] / baseline_days
-        return [{"activity": a, "now": int(cur.get(a, 0)), "baseline": round(past.get(a, 0.0), 1)} for a in activities]
+                       and occurred_at >= %s and occurred_at < %s and ingested_at <= %s group by activity""",
+                    (activities, json.dumps(scope), _aware(s - timedelta(days=d)), _aware(e - timedelta(days=d)),
+                     _aware(asof - timedelta(days=d)))):
+                past[r["activity"]] += r["n"]
+        days = max(days, 1)
+        return [{"activity": a, "now": int(cur.get(a, 0)), "baseline": round(past.get(a, 0.0) / days, 1),
+                 "baseline_days": days} for a in activities]
 
     def supporting_events(self, start, end, scope: dict, activity: str, limit: int = 3) -> list[dict]:
         rows = self.db.execute(
             """select id, activity, occurred_at, attrs from events where activity = %s and attrs @> %s
-               and occurred_at >= %s and occurred_at < %s order by occurred_at limit %s""",
-            (activity, json.dumps(scope), _aware(start), _aware(min(_naive(end), self.now)), limit)).fetchall()
-        keep = ("response", "http_status", "payment_provider", "checkout_release_version", "result_count")
+               and occurred_at >= %s and occurred_at < %s and ingested_at <= %s order by occurred_at limit %s""",
+            (activity, json.dumps(scope), _aware(start), _aware(min(_naive(end), self.now)), self.as_of(),
+             limit)).fetchall()
+        keep = ("response", "http_status", "payment_provider", "checkout_release_version", "search_release",
+                "experiment_arm", "result_count")
         return [{"id": r["id"], "activity": r["activity"], "at": str(_naive(r["occurred_at"])),
                  "attrs": {k: v for k, v in r["attrs"].items() if k in keep}} for r in rows]
 
@@ -316,6 +422,8 @@ def build_graph(data: EyeData) -> BrainGraph:
     """Graph nodes for every metric registered in Eye (breakdown and context edges included)."""
     g = BrainGraph()
     g.profile.update(EYE_PROFILE)
+    # metrics Eye's catalog marks as context only (direction none) are used in investigations, never paged
+    g.profile["silent_metrics"] = sorted(m["id"] for m in data.registered() if m.get("direction") == "none")
     for m in data.registered():
         d = data.catalog.get(m["id"])
         if d is None:   # custom registration: derive from its stored definition
