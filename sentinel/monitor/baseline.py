@@ -9,12 +9,26 @@ whole live run.
 """
 from __future__ import annotations
 
+from functools import lru_cache
+from zoneinfo import ZoneInfo
+
 import numpy as np
 import pandas as pd
 
 from sentinel.brain.validate import local_profile_key
 
 MAD = 1.4826
+_TZ = ZoneInfo("Europe/Berlin")
+
+
+@lru_cache(maxsize=200_000)
+def profile_key(ts) -> str:
+    """Scalar (local hour, weekend) key; same values as validate.local_profile_key, without pandas overhead."""
+    t = pd.Timestamp(ts)
+    if t.tzinfo is None:
+        t = t.tz_localize("UTC")
+    loc = t.tz_convert(_TZ)
+    return f"{loc.hour}{'we' if loc.dayofweek >= 5 else 'wd'}"
 
 
 class SeriesBaseline:
@@ -41,25 +55,27 @@ class SeriesBaseline:
             self.sig, self.sig_all = {}, 0.0
         else:
             e = np.log(h.value.values.clip(min=0) + self.log_c) - np.log(exp.clip(min=0) + self.log_c)
-            s = pd.Series(e, index=k)
             self.sig_all = max(0.01, MAD * float(np.median(np.abs(e - np.median(e)))))
-            self.sig = {key: max(self.sig_all * 0.7, MAD * float(np.median(np.abs(g - g.median()))))
-                        for key, g in s.groupby(level=0) if len(g) >= 6}
+            fr = pd.DataFrame({"k": k, "e": e})                          # per-key MAD, vectorised
+            fr["dev"] = (fr.e - fr.groupby("k").e.transform("median")).abs()
+            g = fr.groupby("k").dev.agg(["median", "size"])
+            g = g[g["size"] >= 6]
+            self.sig = {key: max(self.sig_all * 0.7, MAD * float(v)) for key, v in g["median"].items()}
             self.phi = 1.0
 
     def expected(self, ts) -> tuple[float, float]:
-        key = local_profile_key(pd.Series([pd.Timestamp(ts)])).iloc[0]
+        key = profile_key(pd.Timestamp(ts))
         return float(self.med.get(key, self.overall)), float(self.med_den.get(key, self.overall_den))
 
     def score(self, ts, value: float, denominator: float, factor: float = 1.0) -> dict:
         """Expected value, 4-sigma band and z for one hour. `factor` scales volume (planned events)."""
         exp, _ = self.expected(ts)
         if self.binomial:
-            p = float(np.clip(exp, 1e-4, 1 - 1e-4))
+            p = float(np.clip(exp * factor, 1e-4, 1 - 1e-4))     # learned patterns can shift a rate too
             se = float(np.sqrt(self.phi * p * (1 - p) / max(denominator, 1)))
             z = (value - p) / se
             return {"expected": p, "low": max(0.0, p - 4 * se), "high": min(1.0, p + 4 * se), "z": z}
-        key = local_profile_key(pd.Series([pd.Timestamp(ts)])).iloc[0]
+        key = profile_key(pd.Timestamp(ts))
         s = self.sig.get(key, self.sig_all)
         exp = exp * factor
         if self.kind in ("count", "sum"):   # Poisson floor for small counts

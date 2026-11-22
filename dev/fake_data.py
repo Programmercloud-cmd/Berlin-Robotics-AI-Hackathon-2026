@@ -64,11 +64,14 @@ def _ts(x) -> pd.Timestamp:
 
 class FakeData:
     def __init__(self, nodes: list[MetricNode], formulas: dict[str, str] | None = None,
-                 scenarios: list[str] | None = None, seed: int = 42, now: datetime = LIVE_START):
+                 scenarios: list[str] | None = None, seed: int = 42, now: datetime = LIVE_START,
+                 overrides: dict[str, dict] | None = None):
         self.nodes = {n.id: n for n in nodes}
         self.formulas = dict(formulas or {})
         spec = yaml.safe_load(SCENARIOS.read_text(encoding="utf-8"))
         self.scenarios = {s["id"]: s for s in spec}
+        for sid, upd in (overrides or {}).items():      # fault injection: move a scenario in time / scope
+            self.scenarios[sid] = {**self.scenarios[sid], **upd}
         self.active = scenarios if scenarios is not None else [s["id"] for s in spec if not s.get("optional")]
         self.rng = np.random.default_rng(seed)
         self.now = pd.Timestamp(now)
@@ -246,7 +249,9 @@ class FakeData:
         cm["carts"] = carts_other + carts_feed
         cm["checkouts"] = rng.binomial(cm.carts, 0.55)
         psr = np.full(n, 0.94)
-        hit = self._window(cm.ts, "android_payment_de") & (cm.country == "de").values & (cm.platform == "android").values
+        hit = self._window(cm.ts, "android_payment_de")
+        for k, v in (self.scenarios["android_payment_de"].get("scope") or {}).items():
+            hit = hit & (cm[k] == v).values
         psr = np.where(hit, 0.94 * 0.755, psr)
         cm["orders"] = rng.binomial(cm.checkouts, psr)
         share_feed = np.divide(carts_feed, cm.carts.values, out=np.zeros(n), where=cm.carts.values > 0)
@@ -372,10 +377,9 @@ class FakeData:
                     continue
                 ts = _ts(s["start"] if key == "event" else s["end"]).to_pydatetime()
                 scope = dict(s.get("scope") or {})
-                if e.get("service", "").endswith("android"):
-                    scope = {"platform": "android"}
-                elif e.get("service") == "app-ios":
-                    scope = {"platform": "ios"}
+                platform = (e.get("service") or "").split("-")[-1]
+                if platform in PLATFORM:                 # releases ship per client platform
+                    scope = {"platform": platform}
                 ev.append(Event(id=f"ev_{s['id']}_{key}", ts=ts, type=e["type"], service=e.get("service"),
                                 scope=scope, description=e.get("description", s["id"]),
                                 planned=bool(e.get("planned", False)),

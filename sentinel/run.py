@@ -38,18 +38,21 @@ class Runtime:
         from sentinel.meta.meta_agent import MetaAgent
         from sentinel.monitor.engine import MonitorEngine
 
-        self.bus = EventBus("state/events.jsonl")
+        self.bus = EventBus(getattr(args, "events_path", "state/events.jsonl"))
         self.bus.sim_ts = str(LIVE_START)
         self.bus.publish("SYSTEM", "runtime", {"message": "starting: building the metric graph from the seed"})
         self.graph = BrainGraph.from_seed()
-        self.data = FakeData(list(self.graph.nodes.values()), self.graph.formulas)
+        self.data = FakeData(list(self.graph.nodes.values()), self.graph.formulas,
+                             scenarios=getattr(args, "scenarios", None), seed=getattr(args, "seed", 42),
+                             overrides=getattr(args, "overrides", None))
         self.data.now = LIVE_START
         summary = validate_graph(self.graph, self.data, LIVE_START)
         self.bus.publish("GRAPH_LOADED", "graph", {"metrics": len(self.graph.nodes), "edges": len(self.graph.edges),
                                                    "verdicts": summary.counts(),
                                                    "needs_review": [k for k, e in self.graph.edges.items()
                                                                     if e.status == "needs_review"]})
-        self.monitor = MonitorEngine(self.graph, self.data, self.bus, LIVE_START - pd.Timedelta(days=56), LIVE_START)
+        self.monitor = MonitorEngine(self.graph, self.data, self.bus, LIVE_START - pd.Timedelta(days=56), LIVE_START,
+                                     features=getattr(args, "features", None))
         self.monitor.fit()
         self.meta = None if args.no_meta else MetaAgent(self.graph, self.data, self.monitor, self.bus)
         self.investigator = Investigator(self.graph, self.data, self.monitor, self.bus, meta=self.meta)

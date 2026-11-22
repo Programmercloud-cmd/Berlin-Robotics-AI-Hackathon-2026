@@ -32,7 +32,8 @@ from typing import get_args
 from sentinel.contracts import Dim, Edge, MetricNode, seg_key
 
 
-ALLOWED_DIMS = set(get_args(Dim))   # empty when Dim is an open vocabulary: any data dimension is allowed
+ALLOWED_DIMS = set(get_args(Dim))
+MAX_CROSS_DIM_MEMBERS = 50   # empty when Dim is an open vocabulary: any data dimension is allowed
 
 
 def _cols(sql: str | None) -> set[str]:
@@ -80,6 +81,18 @@ class MetaAgent:
                 if not nodes or key in self.tried:
                     continue
                 self.tried.add(key)
+                probe = nodes[0].model_copy(update={"dimensions": list(nodes[0].dimensions) + [dim]})
+                self.data.register_node(probe)                     # count the dimension's values in the sandbox
+                try:
+                    card = self.data.metric(probe.id, start - timedelta(days=1), start, group_by=[dim])[dim].nunique()
+                except Exception:                                  # noqa: BLE001 - sandbox probe
+                    card = 0
+                finally:
+                    self.data.register_node(nodes[0])
+                if card > MAX_CROSS_DIM_MEMBERS:
+                    self.bus.publish("META_RESULT", "meta", {"text": f"'{dim}' has {card} values: too fine to monitor "
+                                                             f"or localise on; not added"}, incident_id)
+                    continue
                 ids = [n.id for n in nodes]
                 self.bus.publish("META_PROPOSAL", "meta", {"stage": "cross_dimension", "text":
                     f"{table} stores '{dim}' but {', '.join(ids)} do not expose it. Sandbox-test adding it."},

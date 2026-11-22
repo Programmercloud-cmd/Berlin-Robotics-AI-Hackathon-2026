@@ -76,3 +76,27 @@ def test_every_step_is_on_the_bus(rt):
     types = {e.type for e in rt.bus.history}
     assert {"THOUGHT", "ACTION", "OBSERVATION", "HYPOTHESIS", "ANOMALY_DETECTED", "INCIDENT_OPENED",
             "FINAL_REPORT", "GRAPH_MUTATION", "MONITOR_TICK"} <= types
+
+
+# ---------------------------------------------------------------- v2: RiskLoc clues, scan, learning
+def test_monitor_attaches_riskloc_clues(rt):
+    clues = [e for e in rt.bus.of_type("LOCALISATION_CLUE") if e.payload.get("metric") == "payment_success_rate"]
+    assert clues, "the monitor should localise the payment drop before handing it over"
+    segs = [c["segment"] for e in clues for c in e.payload.get("causes", [])]
+    assert {"country": "de", "platform": "android"} in segs
+
+
+def test_learned_patterns_correct_the_baseline(rt):
+    learned = rt.bus.of_type("BASELINE_LEARNED")
+    assert learned, "explained or favourable changes are written back as normal patterns"
+    p = learned[0].payload
+    f, why = rt.monitor.planned_factor(p["metric"], p["segment"], pd.Timestamp(p["from"]))
+    assert any(w.startswith("learned:") for w in why)          # the monitor now expects the confirmed level
+
+
+def test_operator_feedback_learns_and_resolves(rt):
+    inc = next(i for i in rt.incidents.incidents.values() if i.anomalies)
+    n = len(rt.monitor.learned)
+    rt.incidents.feedback(inc.id, "false_alarm")
+    assert len(rt.monitor.learned) > n
+    assert inc.state == "resolved" and inc.label == "explained"

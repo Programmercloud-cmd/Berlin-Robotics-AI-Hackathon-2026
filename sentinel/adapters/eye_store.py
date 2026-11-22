@@ -9,6 +9,7 @@ never touch this schema, and the agent never writes to `eye.*`.
   sentinel.incidents     = eye.incidents    + fingerprint, state, label, first_cause, segment,
                                               impact_eur_total, hypotheses, report_md, alerted
   sentinel.evidence      = eye.evidence     + evidence_key, step, query, interpretation
+  sentinel.known_patterns  patterns investigations confirmed as normal (baseline corrections, v2)
   sentinel.bus_events      every event published on the agent's bus (audit trail / replay)
 """
 from __future__ import annotations
@@ -78,6 +79,17 @@ create table if not exists sentinel.evidence (
     unique (incident_id, evidence_key)
 );
 
+create table if not exists sentinel.known_patterns (
+    id bigint generated always as identity primary key,
+    metric_id text not null,
+    scope jsonb not null,
+    factor double precision not null,          -- expected value is multiplied by this while active
+    valid_from timestamptz not null,
+    valid_until timestamptz not null,
+    reason text not null,
+    incident_id text
+);
+
 create table if not exists sentinel.bus_events (
     seq bigint primary key,
     type text not null,
@@ -136,6 +148,13 @@ class AgentStore:
                 """insert into sentinel.bus_events (seq, type, source, sim_ts, incident_id, payload)
                    values (%s, %s, %s, %s, %s, %s) on conflict (seq) do nothing""",
                 (ev.seq, ev.type, ev.source, ev.sim_ts, ev.incident_id, Jsonb(json.loads(json.dumps(ev.payload, default=str)))))
+            if ev.type == "BASELINE_LEARNED":
+                p = ev.payload
+                self.db.execute(
+                    """insert into sentinel.known_patterns (metric_id, scope, factor, valid_from, valid_until, reason,
+                                                            incident_id) values (%s, %s, %s, %s, %s, %s, %s)""",
+                    (p["metric"], Jsonb(p["segment"]), p["factor"], p["from"], p["until"], p["reason"],
+                     p.get("incident")))
             if ev.incident_id and ev.type in ("INCIDENT_OPENED", "INCIDENT_UPDATED", "INCIDENT_RESOLVED",
                                               "FINAL_REPORT", "OBSERVATION"):
                 self.sync_incident(ev.incident_id, ev)

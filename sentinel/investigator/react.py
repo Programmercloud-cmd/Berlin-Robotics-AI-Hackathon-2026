@@ -40,6 +40,8 @@ def fmt_seg(seg: dict) -> str:
     return seg_key(seg) or "total"
 
 
+UNCONFIRMED_Z = 3.0      # an input must move this much for a formula output's change to count
+
 class Case:
     """Working memory of one investigation."""
 
@@ -125,6 +127,25 @@ class Investigator:
         if any(v["min"] < 0.95 for v in dq.values()) and all(v["incomplete_hours"] for v in dq.values()):
             return self.conclude(case, label="data_issue")
 
+        # ---- 1b. RiskLoc clues from the monitor: start from the strongest candidate set
+        clues = anomaly.get("clues") or []
+        if clues:
+            dims = self.g.nodes[case.entry].dimensions
+            top = next((c for c in clues if all(k in dims for k in c["segment"])), None)
+            self.step(case, "localise",
+                      "The monitor attached RiskLoc candidate root-cause sets: start from the strongest one instead "
+                      "of walking the whole graph from the aggregate.",
+                      f"riskloc({case.entry}, {anomaly['ts']})", lambda: clues,
+                      lambda r: ("; ".join(f"{fmt_seg(c['segment'])} (risk {c['risk']:.2f}, explains "
+                                           f"{c['explanatory_power']:.0%}, z={c.get('z', 0):.1f})" for c in r),
+                                 {fmt_seg(c["segment"]): c["explanatory_power"] for c in r}))
+            case.notes["riskloc"] = clues
+            if top:
+                case.seg = dict(top["segment"])
+                self.bus.publish("THOUGHT", "investigator", {"stage": "localise", "text":
+                    f"Seed the investigation with {fmt_seg(case.seg)}; the next steps verify it (decomposition, "
+                    f"drill-down, negative controls) rather than trust it."}, inc.id)
+
         # ---- 2. onset + decomposition down the formula graph
         onset = self.tools.onset(case.entry, case.seg, a_ts)
         case.start = onset
@@ -139,6 +160,13 @@ class Investigator:
                             lambda r: self._decomp_text(case.focus, r))
             if not dec.get("possible"):
                 break
+            if depth == 1 and dec["parts"] and max(abs(x["z"]) for x in dec["parts"]) < UNCONFIRMED_Z:
+                # a formula output can look extreme when it is a small difference of large sums (contribution);
+                # if no input moved outside its own noise, the "change" is amplified noise, not a problem
+                case.notes["unconfirmed"] = True
+                self.bus.publish("THOUGHT", "investigator", {"stage": "decompose", "text":
+                    f"No input of {case.focus} moved outside its own noise (all |z| < {UNCONFIRMED_Z}): the output's "
+                    "deviation is amplified noise of a difference. Watch it; do not page."}, inc.id)
             top = dec["parts"][0]
             if top["share"] >= 0.5 and abs(top["z"]) >= 3:
                 case.focus = top["input"]
@@ -160,11 +188,14 @@ class Investigator:
                           f"compare_control({case.focus}, {fmt_seg(case.seg)}, vs other {key})",
                           lambda key=key: self.tools.compare_control(case.focus, case.seg, key, onset, now),
                           lambda r, key=key: self._control_text(case, key, r))
-            if r.get("possible") and not r["confined"] and len(case.seg) > 1:
+            if r.get("possible") and not r["confined"]:
                 case.seg.pop(key)
                 self.bus.publish("THOUGHT", "investigator", {"stage": "control", "text":
                     f"The other {key} values move too ({r['siblings_rel']:+.1%}): {key} is not part of the cause. "
-                    f"Generalise the segment to {fmt_seg(case.seg)}."}, inc.id)
+                    f"Generalise the segment to {fmt_seg(case.seg) if case.seg else 'the total'}."}, inc.id)
+                if not case.seg:     # the alert's slice was a wrong guess: localise again from the total
+                    self.localise(case, onset, now)
+                    break
         case.inc.segment = seg_key(case.seg)
 
         # ---- re-estimate the onset on the final (cleaner) segment before matching events
@@ -283,6 +314,23 @@ class Investigator:
                     self.judge(case, h, f"change concentrated in {k}={v} (event scope)", ok,
                                (f"{v} carries {me['dev_share']:.0%} of the change with {me['vol_share']:.0%} of volume"
                                 if me else "member not found"))
+            if e.planned and e.scope and not any(p.startswith("change concentrated in") for p in h.predictions) \
+                    and not any(p.startswith("scope of the planned change") for p in h.predictions):
+                # the focus cannot be split by the plan's scope: check it on the metrics that compose the focus
+                proxy = next((v.src for v in self.g.inputs(case.focus) if all(
+                    k in self.g.nodes[v.src].dimensions for k in list(e.scope) + list(case.seg))), None)
+                if proxy:
+                    k, v = next(iter(e.scope.items()))
+                    dd = self.tools.drilldown(proxy, case.seg, k, start, end)
+                    me = next((m for m in dd["members"] if m["member"] == v), None)
+                    ok = bool(me and me["lift"] >= 1.3 and me["dev_share"] >= 0.4)
+                    self.judge(case, h, f"scope of the planned change checked on input {proxy}: concentrated in {k}={v}",
+                               ok, (f"{v} carries {me['dev_share']:.0%} of {proxy}'s change with {me['vol_share']:.0%} "
+                                    f"of volume") if me else "member not found")
+                else:
+                    self.judge(case, h, "scope of the planned change can be checked on this metric", False,
+                               f"{case.focus} and its inputs cannot be split by {sorted(e.scope)}: timing alone "
+                               "does not explain it")
             if unverifiable and not rerun:
                 if any(k not in self.g.nodes[case.focus].dimensions for k in unverifiable):
                     case.dead_end_reasons.append(
@@ -423,10 +471,18 @@ class Investigator:
         money_base = self.mon.baseline(money_id, {}).expected(ts_mid)[0] if money_id in self.g.nodes else 0.0
         margin = money_base / max(self.mon.baseline(gmv_id, {}).expected(ts_mid)[0], 1e-9)
         d_gmv = ((w["actual"] - w["expected"]) * scale) if np.isfinite(w.get("actual", np.nan)) else 0.0
+        money_total = d_gmv * margin
+        # attribute only what the first cause explains: push its own deviation through the formula graph
+        # (the segment's GMV can also move for other reasons, e.g. a concurrent incident)
+        f = self.tools.window_dev(case.focus, case.seg, case.start, case.end)
+        if np.isfinite(f.get("actual", np.nan)) and f.get("expected") and case.focus in self.g.nodes:
+            per_h = self.mon.impact_eur(case.focus, case.seg, ts_mid, f["actual"], f["expected"])
+            if per_h or money_id in self.mon.propagate(case.focus, 0.01, ts_mid)["relative_changes"]:
+                money_total = per_h * hours
         out.update({"hours": hours, "gmv_delta_eur": d_gmv, "money_label": prof.get("money_label", "contribution"),
                     "orders_delta": (o["actual"] - o["expected"]) if np.isfinite(o.get("actual", np.nan)) else 0.0,
-                    "margin": margin, "contribution_eur_total": d_gmv * margin,
-                    "contribution_eur_per_h": d_gmv * margin / hours})
+                    "margin": margin, "contribution_eur_total": money_total,
+                    "contribution_eur_per_h": money_total / hours})
         return out
 
     def _candidate_events(self, onset):

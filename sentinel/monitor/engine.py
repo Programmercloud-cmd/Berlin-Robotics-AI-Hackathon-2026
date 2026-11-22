@@ -10,6 +10,17 @@ Each tick (one simulated hour):
   detect      spike (|z| >= 4.5 with enough support) or CUSUM (sustained shift)
   alert       series that turn anomalous emit ANOMALY_DETECTED with a euro impact estimate;
               series that stay normal for 3 complete hours emit SERIES_RECOVERED
+
+v2 additions (each can be switched off for ablation via `features`):
+  scan        multi-dimensional scan: every pair of dimensions of the key metrics is tested cell by cell
+              against its same-hour history, with Benjamini-Hochberg FDR control over all cells of the tick,
+              so a DE x iOS failure is seen while the total only wobbles
+  riskloc     detection and localisation are separated: an aggregate anomaly is handed to the investigator
+              together with RiskLoc's candidate root-cause sets (LOCALISATION_CLUE)
+  process     anomalies on process metrics (PM4Py conformance / performance, outcome-branch shares) are
+              raised as PROCESS_DEVIATION early warnings
+  learning    patterns that investigations confirmed as normal (explained / favourable / operator feedback)
+              are written back as baseline corrections with an expiry (BASELINE_LEARNED)
 """
 from __future__ import annotations
 
@@ -23,11 +34,17 @@ from sentinel.brain.graph import BrainGraph
 from sentinel.bus import EventBus
 from sentinel.contracts import seg_key
 
+from itertools import combinations
+
+from scipy import stats
+
 from .baseline import SeriesBaseline
 
 SPIKE_Z, CUSUM_K, CUSUM_H, RECOVER_HOURS, LOOKBACK_H = 4.5, 1.0, 8.0, 3, 6
 CAMPAIGN_DEFAULT_HOURS = 24        # Event has no end time in the contract: campaigns are assumed to last a day
 KEY_METRICS = ["contribution", "gmv", "orders", "conversion_rate", "payment_success_rate", "sessions"]
+SCAN_FDR_Q, SCAN_PHI, SCAN_MIN_REL = 1e-3, 2.0, 0.10
+DEFAULT_FEATURES = {"scan": True, "riskloc": True, "process": True, "learning": True}
 
 
 def seg_from_key(key: str) -> dict:
@@ -35,8 +52,12 @@ def seg_from_key(key: str) -> dict:
 
 
 class MonitorEngine:
-    def __init__(self, graph: BrainGraph, data, bus: EventBus, history_start, history_end):
+    def __init__(self, graph: BrainGraph, data, bus: EventBus, history_start, history_end,
+                 features: dict | None = None):
         self.g, self.data, self.bus = graph, data, bus
+        self.features = {**DEFAULT_FEATURES, **(features or {})}
+        self.learned: list[dict] = []
+        self._forecaster = None
         self.h0, self.h1 = pd.Timestamp(history_start), pd.Timestamp(history_end)
         self.baselines: dict[tuple[str, str], SeriesBaseline] = {}
         self.evaluated: set[tuple[str, str, pd.Timestamp]] = set()
@@ -73,17 +94,27 @@ class MonitorEngine:
 
     # ================================================================ planned events (innocent changes)
     def _active_planned(self, ts) -> list:
-        evs = self.data.events(ts - timedelta(hours=CAMPAIGN_DEFAULT_HOURS), ts + timedelta(hours=1))
-        return [e for e in evs if e.planned and e.expected_effect and
-                pd.Timestamp(e.ts) <= ts < pd.Timestamp(e.ts) + timedelta(hours=CAMPAIGN_DEFAULT_HOURS)]
+        key = (pd.Timestamp(ts), pd.Timestamp(getattr(self.data, "now", ts)))
+        cache = self.__dict__.setdefault("_planned_cache", {})
+        if key not in cache:
+            evs = self.data.events(ts - timedelta(hours=CAMPAIGN_DEFAULT_HOURS), ts + timedelta(hours=1))
+            cache[key] = [e for e in evs if e.planned and e.expected_effect and
+                          pd.Timestamp(e.ts) <= ts < pd.Timestamp(e.ts) + timedelta(hours=CAMPAIGN_DEFAULT_HOURS)]
+        return cache[key]
 
     def planned_factor(self, metric: str, segment: dict, ts) -> tuple[float, list[str]]:
         """Expected-volume multiplier from planned events. Traffic effects (sessions) scale every volume
         metric in scope; rates are expected unchanged."""
         node = self.g.nodes[metric]
-        if node.kind not in ("count", "sum"):
-            return 1.0, []
         f_total, why = 1.0, []
+        if self.features["learning"]:
+            for p in self.learned:
+                if p["metric"] == metric and p["from"] <= pd.Timestamp(ts) < p["until"] and \
+                        all(segment.get(k) == v for k, v in p["segment"].items()):
+                    f_total *= p["factor"]
+                    why.append(f"learned: {p['reason']} x{p['factor']:.2f}")
+        if node.kind not in ("count", "sum"):
+            return f_total, why
         for ev in self._active_planned(ts):
             f = ev.expected_effect.get(metric)
             if f is None:
@@ -185,6 +216,19 @@ class MonitorEngine:
                     a = self._judge(m, seg, ts, row)
                     if a:
                         anomalies.append(a)
+        if self.features["scan"]:
+            anomalies += self._scan(now)
+        for a in anomalies:
+            node = self.g.nodes[a["metric"]]
+            if self.features["process"] and (node.owner.startswith("pm4py") or a["metric"].endswith("_share")
+                                             and node.owner.startswith("pm4py")):
+                a["detector"] = "process"
+                self.bus.publish("PROCESS_DEVIATION", "monitor", {
+                    "metric": a["metric"], "segment": a["segment"], "hour": a["ts"], "actual": a["actual"],
+                    "expected": a["expected"], "z": a["z"],
+                    "text": "process signal: the lifecycle deviates from its discovered behaviour"})
+            if self.features["riskloc"]:
+                self._clues(a)
         for (t, ts) in list(self.pending_dq):
             if self.data.completeness(t, ts) >= 0.95:
                 self.pending_dq.discard((t, ts))
@@ -245,6 +289,118 @@ class MonitorEngine:
                     self.bus.publish("SERIES_RECOVERED", "monitor", {"metric": m, "segment": seg_key(seg),
                                                                      "hour": str(ts)})
         return None
+
+    # ================================================================ v2: multi-dimensional scan
+    @property
+    def forecaster(self):
+        if self._forecaster is None:
+            from sentinel.riskloc import LeafForecaster
+            self._forecaster = LeafForecaster(self.data, self.g, self.h0, self.h1)
+        return self._forecaster
+
+    def scan_metrics(self) -> list[str]:
+        keys = self.g.profile.get("key_metrics", KEY_METRICS)
+        return [m for m in keys if m in self.g.nodes and self.g.nodes[m].kind in ("count", "ratio")
+                and len(self.g.nodes[m].dimensions) >= 2]
+
+    def _scan(self, now) -> list[dict]:
+        """Test every cell of every dimension pair of the key metrics; BH-FDR over all tests of this tick."""
+        from sentinel.brain.validate import local_profile_key
+        start = now - timedelta(hours=LOOKBACK_H)
+        tests = []
+        for m in self.scan_metrics():
+            node = self.g.nodes[m]
+            for pair in combinations(node.dimensions, 2):
+                hist = self.forecaster._fit(m, pair)
+                cur = self.data.metric(m, start, now, group_by=list(pair))
+                cur = cur[cur.complete].dropna(subset=["value"])
+                if cur.empty:
+                    continue
+                cur = cur.assign(k=local_profile_key(cur.ts).values)
+                for d in pair:
+                    cur[d] = cur[d].astype(str)
+                    hist[d] = hist[d].astype(str)
+                mm = cur.merge(hist, on=list(pair) + ["k"], how="inner")
+                for r in mm.itertuples():
+                    seg = {pair[0]: getattr(r, pair[0]), pair[1]: getattr(r, pair[1])}
+                    key = (m, "scan:" + seg_key(seg), pd.Timestamp(r.ts))
+                    if key in self.evaluated or r.n < 3:
+                        continue
+                    self.evaluated.add(key)
+                    factor, _ = self.planned_factor(m, seg, pd.Timestamp(r.ts))   # planned + learned
+                    sd = r.sd if r.sd == r.sd else 0.0                             # cell's own history spread
+                    if node.kind == "ratio":
+                        if not r.den or r.denominator < 50:
+                            continue
+                        p = min(max(r.num / r.den * factor, 1e-4), 1 - 1e-4)
+                        exp, act = p, r.value
+                        z = (act - p) / max(sd, np.sqrt(SCAN_PHI * p * (1 - p) / r.denominator))
+                    else:
+                        if r.val < 20:
+                            continue
+                        exp, act = r.val * factor, r.value
+                        z = (act - exp) / max(sd * factor, np.sqrt(SCAN_PHI * exp))
+                    rel = act / exp - 1 if exp else 0.0
+                    tests.append((float(2 * stats.norm.sf(abs(z))), z, rel, m, seg, pd.Timestamp(r.ts), act, exp))
+        if not tests:
+            return []
+        tests.sort(key=lambda t: t[0])
+        n, cutoff = len(tests), -1
+        for i, t in enumerate(tests):                      # Benjamini-Hochberg
+            if t[0] <= SCAN_FDR_Q * (i + 1) / n:
+                cutoff = i
+        out = []
+        for i, (p, z, rel, m, seg, ts, act, exp) in enumerate(tests):
+            skey = (m, "scan:" + seg_key(seg))
+            st = self.state[skey]
+            hit = i <= cutoff and abs(rel) >= SCAN_MIN_REL
+            if hit and not st["anomalous"]:
+                st["anomalous"], st["normal_run"] = True, 0
+                a = {"metric": m, "segment": seg_key(seg), "ts": str(ts), "actual": act, "expected": exp,
+                     "low": None, "high": None, "z": float(z), "detector": "scan",
+                     "direction": "up" if z > 0 else "down", "good_direction": self.g.nodes[m].good_direction,
+                     "planned_adjustment": [], "p_value": p, "tests_this_tick": n,
+                     "impact_eur_per_h": self.impact_eur(m, seg, ts, act, exp)}
+                self.bus.publish("ANOMALY_DETECTED", "monitor", a)
+                out.append(a)
+            elif not hit and st["anomalous"]:
+                st["normal_run"] += 1
+                if st["normal_run"] >= RECOVER_HOURS:
+                    st["anomalous"] = False
+        self.bus.publish("SCAN", "monitor", {"cells_tested": n, "significant": cutoff + 1, "new_anomalies": len(out),
+                                             "fdr_q": SCAN_FDR_Q})
+        return out
+
+    # ================================================================ v2: localisation clues (RiskLoc)
+    def _clues(self, a: dict):
+        from sentinel.riskloc import riskloc
+        node = self.g.nodes[a["metric"]]
+        seg = seg_from_key(a["segment"])
+        dims = [d for d in node.dimensions if d not in seg][:4]
+        if node.kind not in ("count", "ratio", "sum") or len(dims) < 2 or len(seg) > 1:
+            return
+        ts = pd.Timestamp(a["ts"])
+        leaves = self.forecaster.leaves(a["metric"], list(seg) + dims, ts, ts + timedelta(hours=1))
+        for k, v in seg.items():
+            leaves = leaves[leaves[k].astype(str) == v]
+        res = riskloc(leaves, dims)
+        causes = [{**c, "segment": {**seg, **c["segment"]}} for c in res.get("causes", [])]
+        a["clues"] = causes
+        self.bus.publish("LOCALISATION_CLUE", "monitor", {
+            "metric": a["metric"], "segment": a["segment"], "hour": a["ts"], "method": "riskloc",
+            "leaves": res.get("leaves"), "abnormal_leaves": res.get("abnormal_leaves"), "causes": causes})
+
+    # ================================================================ v2: learning from investigations
+    def learn(self, metric: str, segment: dict, factor: float, start, until, reason: str, incident: str | None = None):
+        if not self.features["learning"] or not np.isfinite(factor) or factor <= 0:
+            return
+        p = {"metric": metric, "segment": dict(segment), "factor": float(factor), "from": pd.Timestamp(start),
+             "until": pd.Timestamp(until), "reason": reason, "incident": incident}
+        self.learned.append(p)
+        for k in [k for k in self.state if k[0] == metric]:
+            self.state[k]["anomalous"] = False                # re-judge the series under the new expectation
+        self.bus.publish("BASELINE_LEARNED", "monitor", {**p, "from": str(p["from"]), "until": str(p["until"])},
+                         incident)
 
     # ================================================================ euro impact
     def impact_eur(self, metric: str, seg: dict, ts, actual: float, expected: float) -> float:
