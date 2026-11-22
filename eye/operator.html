@@ -8,53 +8,41 @@
   <link rel="stylesheet" href="/theme.css">
   <style>
     .shell { width: min(100% - 2.5rem, 72rem); margin-inline: auto; }
-    main { padding-block: clamp(3rem, 8vh, 6rem); }
-    h1 { margin: 0 0 .8rem; font-size: clamp(2.2rem, 5.5vw, 3.7rem); font-weight: 540; letter-spacing: -.055em; }
+    main { padding-block: 1.25rem 3rem; }
     p { line-height: 1.55; color: var(--muted); }
-    .intro { margin: 0 0 1.7rem; }
+    .intro { margin: 0 0 1rem; }
     .run-controls { max-width: 45rem; border: 1px solid var(--line); border-radius: .55rem; background: var(--surface); overflow: hidden; }
     .startup { display: flex; gap: .6rem; align-items: center; border-bottom: 1px solid var(--line); padding: .85rem 1.15rem; }
     .startup p { margin: 0; color: var(--text); }
     .startup:has([data-phase="failed"]) .status-dot { background: var(--danger); }
-    .launches { display: grid; grid-template-columns: 1fr 1fr; }
     .launch-option { display: grid; align-content: start; gap: .6rem; padding: 1.15rem; }
-    .launch-option + .launch-option { border-left: 1px solid var(--line); }
     h2 { margin: 0; font-size: 1.12rem; letter-spacing: -.02em; }
     .launch-option p { margin: 0 0 .4rem; font-size: .92rem; }
     #error { color: var(--danger); margin: 1rem 1.15rem; }
     .launch-option button { justify-self: start; border: 1px solid var(--accent); border-radius: .35rem; padding: .56rem .75rem; color: var(--accent); background: var(--accent-wash); font-weight: 650; }
     .launch-option button:hover:not(:disabled) { background: var(--surface); }
     .view-links { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 1.15rem; font-weight: 620; }
-    @media (max-width: 35rem) {
-      .launches { grid-template-columns: 1fr; }
-      .launch-option + .launch-option { border-left: 0; border-top: 1px solid var(--line); }
-    }
   </style>
 </head>
 <body>
   <header class="app-bar">
     <div class="shell app-bar-row">
       <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Eye of the System</div>
-      <button class="theme-toggle" type="button" hidden>Use dark theme</button>
+      <h1 class="app-bar-title">Operator panel</h1>
+      <div class="app-bar-tools">
+        <button class="theme-toggle" type="button" hidden>Use dark theme</button>
+      </div>
     </div>
   </header>
   <main class="shell">
-    <h1>Operator panel</h1>
-    <p class="intro">Choose a local run. Each run starts with a fresh PostgreSQL database.</p>
-    <section class="run-controls" aria-label="Local runs">
+    <p class="intro">Start the local test lab and watch Eye prepare the baseline.</p>
+    <section class="run-controls" aria-label="Test lab launcher">
       <div class="startup" role="status"><span class="status-dot" id="status-dot"></span><p id="status">Connecting to the launcher.</p></div>
       <p id="error" role="alert" hidden></p>
-      <div class="launches">
-        <div class="launch-option">
-          <h2>Payment rehearsal</h2>
-          <p>Run the seeded payment disruption and recovery demo.</p>
-          <button type="button" id="start" disabled>Start fresh payment rehearsal</button>
-        </div>
-        <div class="launch-option">
-          <h2>Test lab</h2>
-          <p>Generate normal traffic or preview and apply a custom scenario.</p>
-          <button type="button" id="start-lab" disabled>Start test lab</button>
-        </div>
+      <div class="launch-option">
+        <h2>Test lab</h2>
+        <p>Generate normal traffic or preview and apply a custom scenario.</p>
+        <button type="button" id="start-lab" disabled>Start test lab</button>
       </div>
     </section>
     <nav class="view-links" aria-label="Local views">
@@ -64,18 +52,17 @@
   </main>
   <script>
     const messages = {
-      idle: "Ready to start a local run.",
-      starting: "Starting the rehearsal.",
+      idle: "Ready to start the test lab.",
+      starting: "Starting the test lab.",
       postgres: "Starting local PostgreSQL.",
       baseline: "Generating historical marketplace events.",
       discovery: "Discovering workflows and calculating baseline metrics.",
       dashboard: "Opening the Eye dashboard.",
       ready: "Eye is ready on port 8000.",
-      failed: "The run stopped. Check the launcher terminal for details."
+      failed: "The test lab stopped. Check the launcher terminal for details."
     };
     const status = document.querySelector("#status");
     const statusDot = document.querySelector("#status-dot");
-    const start = document.querySelector("#start");
     const startLab = document.querySelector("#start-lab");
     const eye = document.querySelector("#eye");
     const lab = document.querySelector("#lab");
@@ -86,9 +73,7 @@
       status.textContent = messages[state.phase];
       status.dataset.phase = state.phase;
       statusDot.classList.toggle("connected", state.phase === "ready");
-      const canStart = ["idle", "ready", "failed"].includes(state.phase);
-      start.disabled = launching || !canStart;
-      startLab.disabled = start.disabled;
+      startLab.disabled = launching || !["idle", "failed"].includes(state.phase);
       eye.hidden = !state.eye_url;
       lab.hidden = !state.lab_url;
     }
@@ -96,39 +81,37 @@
     async function refresh() {
       if (launching) return;
       try {
-        const response = await fetch("/api/rehearsal", { cache: "no-store" });
+        const response = await fetch("/api/test-lab", { cache: "no-store" });
         if (!response.ok) throw new Error();
         const state = await response.json();
         if (!launching) show(state);
       } catch {
         status.textContent = "The operator panel is reconnecting.";
         statusDot.classList.remove("connected");
-        start.disabled = true;
         startLab.disabled = true;
         eye.hidden = true;
         lab.hidden = true;
       }
     }
 
-    async function launch(path) {
+    async function launch() {
       launching = true;
       error.hidden = true;
       show({ phase: "starting" });
       try {
-        const response = await fetch(path, { method: "POST" });
+        const response = await fetch("/api/test-lab", { method: "POST" });
         const state = await response.json();
         if (!response.ok) throw new Error(state.detail);
         show(state);
       } catch (failure) {
-        error.textContent = failure.message || "The rehearsal could not start.";
+        error.textContent = failure.message || "The test lab could not start.";
         error.hidden = false;
       } finally {
         launching = false;
         refresh();
       }
     }
-    start.addEventListener("click", () => launch("/api/rehearsal"));
-    startLab.addEventListener("click", () => launch("/api/test-lab"));
+    startLab.addEventListener("click", launch);
     refresh();
     setInterval(refresh, 1000);
   </script>

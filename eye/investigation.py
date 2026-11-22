@@ -6,12 +6,13 @@ from collections import deque
 from datetime import datetime, timedelta
 from statistics import fmean
 
-import networkx as nx
 from psycopg.types.json import Jsonb
 
 from eye.db import connect, state
+from eye.investigation_branches import build_branches
 from eye.model import ask
 from eye.observation import observation_tool
+from eye.transitions import ALERT_STEPS, BY_ID, POSITIONS, WORKFLOW, Readings, compatible
 
 HOUR = timedelta(hours=1)
 log = logging.getLogger(__name__)
@@ -19,14 +20,12 @@ PRIORITY = {
     "measures": 0, "calculated_from": 1, "precedes": 2, "depends_on": 3,
     "part_of": 4, "associated_with": 5, "may_influence": 6, "sourced_from": 7,
 }
-TRANSITION_EVENTS = {
-    "product_view_sessions": ("product_page_requested", "product_page_load_failed", "successful product views"),
-    "add_to_cart_sessions": ("cart_add_requested", "cart_add_failed", "successful cart additions"),
-}
 REPORT_PROMPT = """Investigate this marketplace anomaly using only the provided observations.
 Distinguish the observed failure mechanism from an unverified underlying cause.
 Use scoped observation evidence and reference the graph or metric evidence by node ID.
-Use the earliest observed funnel break when available. Customer geography does
+Use the identified transition and its eligible population when available. A smaller
+downstream population can coexist with a separate degraded completion rate.
+Keep event IDs and raw payloads in supporting evidence. Customer geography does
 not establish a hosting location. Name a hosting location only when an observed
 event explicitly identifies it.
 Estimate business impact from comparable observations and state the uncertainty.
@@ -43,22 +42,11 @@ def metric_node(metric_id):
 
 
 def add_evidence(db, incident_id, start, kind, payload, node_id=None):
-    db.execute(
+    return db.execute(
         """insert into evidence (incident_id, window_start, kind, node_id, payload)
-           values (%s, %s, %s, %s, %s)""",
+           values (%s, %s, %s, %s, %s) returning id""",
         (incident_id, start, kind, node_id, jsonb(payload)),
-    )
-
-
-def overlaps(left, right):
-    return all(right.get(key, value) == value for key, value in left.items())
-
-
-def related(graph, first, second):
-    if not overlaps(first["scope"], second["scope"]):
-        return False
-    source, target = metric_node(first["metric_id"]), metric_node(second["metric_id"])
-    return source == target or target in nx.single_source_shortest_path_length(graph, source, cutoff=4)
+    ).fetchone()["id"]
 
 
 def reference(tool, metric_id, start, scope, baseline):
@@ -90,56 +78,37 @@ def signal(tool, metric_id, start, scope, baseline):
     }
 
 
-def first_funnel_break(db, tool, start, scope, baseline, incident):
-    stages = ("sessions", "product_view_sessions", "add_to_cart_sessions", "checkout_sessions")
-    previous = None
-    for identifier in stages:
-        current = signal(tool, identifier, start, scope, baseline)
-        if (previous and current and previous["scope"] == current["scope"]
-                and previous["observed"] >= 30 and previous["expected"]
-                and current["expected"] is not None):
-            observed = current["observed"] / previous["observed"]
-            expected = current["expected"] / previous["expected"]
-            if expected - observed >= 0.10:
-                label = TRANSITION_EVENTS.get(identifier, (None, None, current["name"].lower()))[2]
-                text = (f"The first measured funnel drop in this scope was at {label}. "
-                        f"{current['observed']:.0f} of {previous['observed']:.0f} reached that step "
-                        f"({observed:.1%} versus {expected:.1%} expected). "
-                        f"Evidence: {metric_node(previous['metric_id'])}, {metric_node(identifier)}.")
-                add_evidence(db, incident, start, "first observable break",
-                             {"upstream": previous, "downstream": current,
-                              "observed_share": observed, "expected_share": expected}, metric_node(identifier))
-                return text, identifier, current["scope"]
-        previous = current
-    return None, None, None
-
-
-def transition_evidence(db, tool, incident, start, stage, scope, samples):
-    if stage not in TRANSITION_EVENTS:
+def transition_evidence(db, tool, incident, start, completion, samples):
+    step = BY_ID[completion["id"]]
+    add_evidence(db, incident, start, "first observable break", completion, metric_node(step.metric))
+    if not step.failure:
         return None
-    request, failure, _ = TRANSITION_EVENTS[stage]
-    failures = tool("supporting_events", window_start=start, scope=scope, activities=[failure], limit=3)
+    breakdown = completion["scope"]
+    failures = tool("supporting_events", window_start=start, scope=breakdown,
+                    activities=[step.failure], limit=3)
     if not failures:
         return None
     example = failures[0]
-    session = example["attrs"].get("session_id")
-    requests = tool("supporting_events", window_start=start, scope={**scope, "session_id": session},
-                    activities=[request], limit=1) if session else []
-    for event_type, rows in ((request, requests), (failure, failures)):
+    identity = example["attrs"].get(step.identity)
+    requests = tool("supporting_events", window_start=start, scope={**breakdown, step.identity: identity},
+                    activities=[step.entry], limit=1) if identity else []
+    for activity, rows in ((step.entry, requests), (step.failure, failures)):
         if rows:
-            node = f"activity:{event_type}"
+            node = f"activity:{activity}"
             samples.append({"node": node, "events": rows})
-            add_evidence(db, incident, start, "observed events", rows, node)
-    response = example["attrs"].get("http_status")
-    outcome = f" returned HTTP {response}" if response is not None else " recorded a failed outcome"
-    prefix = f"Request {requests[0]['id']} ({request}) did not complete. " if requests else ""
-    return f"{prefix}Event {example['id']} ({failure}){outcome}."
+            # The event can already be visible to Eye while graph discovery catches up.
+            known = tool("graph_neighbors", node_id=node).get("node")
+            add_evidence(db, incident, start, "observed events", rows, node if known else None)
+    response = example["attrs"].get("http_status") or example["attrs"].get("response")
+    outcome = f" recorded {str(response).replace('_', ' ')}" if response is not None else " recorded failures"
+    return f"Observed {step.failure.replace('_', ' ')} events{outcome}."
 
 
-def collect_evidence(db, tool, anomaly, incident, baseline):
+def collect_evidence(db, tool, anomaly, incident, baseline, completion=None):
     start, scope = anomaly["window_start"], anomaly["scope"]
     root = metric_node(anomaly["metric_id"])
-    add_evidence(db, incident, start, "anomaly", anomaly, root)
+    if "id" in anomaly:
+        add_evidence(db, incident, start, "anomaly", anomaly, root)
     breakdown = tool("metric_breakdown", metric_id=anomaly["metric_id"], window_start=start)
     comparisons = [row for row in breakdown if row["scope"].keys() == scope.keys()]
     comparisons = sorted(comparisons, key=lambda row: -row["sample_size"])[:12]
@@ -149,7 +118,7 @@ def collect_evidence(db, tool, anomaly, incident, baseline):
 
     queue = deque([(root, 0, None)])
     seen, paths, signals, samples = {root}, [], [], []
-    while queue and len(paths) < 30:
+    while queue and len(paths) < 8:
         node_id, depth, edge = queue.popleft()
         neighborhood = tool("graph_neighbors", node_id=node_id)
         node = neighborhood.get("node")
@@ -170,10 +139,8 @@ def collect_evidence(db, tool, anomaly, incident, baseline):
                 samples.append({"node": node_id, "events": rows})
                 add_evidence(db, incident, start, "observed events", rows, node_id)
 
-        # Expand beyond immediate consequences while the failure mechanism is unclear.
-        clear_signal = any(row["expected"] is not None and row["observed"] >= 4 and
-                           row["observed"] >= 3 * max(1, row["expected"]) for row in signals)
-        if depth == 3 or (depth >= 2 and clear_signal):
+        # Keep the initial report local. The branch worker checks upstream telemetry.
+        if depth == 1:
             continue
         for link in sorted(neighborhood.get("edges", []), key=lambda row: (
             PRIORITY.get(row["kind"], 9), row["source"], row["target"]
@@ -183,26 +150,29 @@ def collect_evidence(db, tool, anomaly, incident, baseline):
                 seen.add(neighbor)
                 queue.append((neighbor, depth + 1, link))
 
-    first_break, stage, break_scope = first_funnel_break(db, tool, start, scope, baseline, incident)
-    transition_failure = transition_evidence(db, tool, incident, start, stage, break_scope, samples)
-    if transition_failure:
-        first_break += " " + transition_failure
-
     definition = tool("metric_definition", metric_id=anomaly["metric_id"])
     label = definition["name"]
     scope_label = ", ".join(f"{key} {value}" for key, value in sorted(scope.items())) or "all traffic"
-    estimate = abs(anomaly["expected"] - anomaly["observed"])
+    observed, expected = anomaly["observed"], anomaly["expected"]
     is_rate = (definition["calculation"]["op"] in {"ratio", "share"}
                or definition["access"].get("unit") == "ratio")
+    first_break = transition_failure = None
+    if completion:
+        label = completion["label"]
+        observed, expected = completion["observed"], completion["expected"]
+        is_rate = True
+        first_break = (f"{completion['completed']} of {completion['eligible']} eligible attempts completed "
+                       f"({observed:.1%} versus {expected:.1%} expected).")
+        transition_failure = transition_evidence(db, tool, incident, start, completion, samples)
+    estimate = abs(expected - observed)
     if is_rate:
-        summary = (f"{label} reached {anomaly['observed']:.1%} versus "
-                   f"{anomaly['expected']:.1%} expected in {scope_label}.")
-        impact = (f"The {estimate:.1%} rate gap represents about "
-                  f"{round(estimate * anomaly['sample_size'])} outcomes versus baseline "
-                  f"across {anomaly['sample_size']} observations in this window.")
+        size = completion["eligible"] if completion else anomaly["sample_size"]
+        summary = f"{label} reached {observed:.1%} versus {expected:.1%} expected in {scope_label}."
+        direction = "fewer" if observed < expected else "more"
+        outcome = "completions" if completion else "outcomes"
+        impact = f"About {round(estimate * size)} {direction} {outcome} versus baseline across {size} observations."
     else:
-        summary = (f"{label} reached {anomaly['observed']:.1f} versus "
-                   f"{anomaly['expected']:.1f} expected in {scope_label}.")
+        summary = f"{label} reached {observed:.1f} versus {expected:.1f} expected in {scope_label}."
         impact = f"Observed volume differed from the baseline by about {estimate:.1f}."
     candidates = sorted(
         (row for row in signals if row["expected"] is not None and
@@ -224,13 +194,13 @@ def collect_evidence(db, tool, anomaly, incident, baseline):
     if first_break:
         report["first_observable_break"] = first_break
         report["uncertainty"] = ("The evidence shows where the funnel broke. The underlying service cause remains unverified.")
-        if stage == "product_view_sessions":
+        if completion["id"] == "product_view":
             report["uncertainty"] += " The observed events do not identify a hosting location."
     context = {
         "anomaly": anomaly, "metric": label, "affected_scope": scope,
         "baseline_impact": impact, "metric_evidence": signals, "event_evidence": samples,
         "segment_comparison": comparisons, "context": window_context, "graph_path": paths,
-        "first_observable_break": first_break,
+        "first_observable_break": first_break, "transition": completion,
     }
     return report, context
 
@@ -243,8 +213,11 @@ def resolve_report(model, context, fallback):
         for field in ("hosting_location", "hosting_region", "datacenter", "edge_location")
     )
 
+    event_ids = {row["id"] for sample in context.get("event_evidence", ()) for row in sample.get("events", ())
+                 if row.get("id")}
+
     def supported(text):
-        return (isinstance(text, str) and bool(text.strip())
+        return (isinstance(text, str) and bool(text.strip()) and not any(identifier in text for identifier in event_ids)
                 and (frankfurt_observed or "frankfurt" not in text.casefold()))
 
     usable = {key: answer[key] for key in ("summary", "impact", "uncertainty")
@@ -294,71 +267,225 @@ def watch_reports(dsn, stop, model, poll=0.5):
         stop.wait(poll)
 
 
-def track(db, start, anomalies, model=None):
-    open_incidents = db.execute("select * from incidents where recovered_at is null").fetchall()
-    if not anomalies and not open_incidents:
-        return
-    tool = observation_tool(db)
-    graph = nx.Graph()
-    graph.add_nodes_from(row["id"] for row in db.execute("select id from graph_nodes").fetchall())
-    graph.add_edges_from((row["source"], row["target"]) for row in db.execute(
-        """select source, target from graph_edges
-           where kind in ('measures', 'part_of', 'precedes', 'calculated_from', 'depends_on')"""
-    ).fetchall())
-    pending = list(anomalies)
-    health = tool("metric_readings", metric_id="data_completeness_ratio", start=start, end=start + HOUR)
-    good_data = not health or (health[-1]["value"] is not None and health[-1]["value"] >= 0.97)
-    for incident in open_incidents:
-        anchor = next((row for row in pending if row["metric_id"] == incident["metric_id"]
-                       and row["scope"] == incident["scope"]), None)
-        if anchor:
-            nearby = [row for row in pending if related(graph, anchor, row)]
-            for row in nearby:
-                add_evidence(db, incident["id"], start, "ongoing anomaly", row, metric_node(row["metric_id"]))
-                pending.remove(row)
-            db.execute("update incidents set updated_at = %s, healthy_windows = 0 where id = %s",
-                       (start, incident["id"]))
-            continue
+def finish_next_branch(dsn, stop):
+    with connect(dsn) as db:
+        if stop.is_set() or not db.execute(
+            "select pg_try_advisory_xact_lock(hashtext('eye.evidence_branches')) as claimed"
+        ).fetchone()["claimed"]:
+            return False
+        baseline = state(db, "baseline_through")
+        latest = state(db, "last_window")
+        if not baseline or not latest:
+            return False
+        cutoff = db.execute(
+            "select coalesce(observation_snapshot, end_at) as cutoff from windows where start_at = %s",
+            (datetime.fromisoformat(latest),),
+        ).fetchone()["cutoff"]
+        incident = db.execute(
+            """select * from incidents
+               where report->>'deep_investigation' = 'pending'
+                  or (report->>'branch_waits_for_receipts' = 'true'
+                      and (report->>'branch_observed_through')::timestamptz < %s)
+               order by (report->>'deep_investigation' = 'pending') desc, id limit 1""",
+            (cutoff,),
+        ).fetchone()
+        if not incident:
+            return False
+        findings, watch_receipts, observed_through = build_branches(db, incident, cutoff, datetime.fromisoformat(baseline))
+        if stop.is_set():
+            return False
+        previous = incident["report"].get("evidence_branches", [])
+        branches = [branch for branch, _ in findings]
+        if branches != [{key: value for key, value in branch.items() if key != "evidence_id"} for branch in previous]:
+            for branch, details in findings:
+                branch["evidence_id"] = add_evidence(
+                    db, incident["id"], incident["opened_at"], "branch evidence",
+                    {"title": branch["title"], "observed_through": observed_through, **details},
+                )
+        else:
+            branches = previous
+        fields = {"evidence_branches": branches, "deep_investigation": "complete",
+                  "branch_waits_for_receipts": watch_receipts, "branch_observed_through": observed_through}
+        db.execute("update incidents set report = report || %s where id = %s", (jsonb(fields), incident["id"]))
+        return True
 
+
+def watch_branches(dsn, stop, poll=0.5):
+    while not stop.is_set():
+        try:
+            if finish_next_branch(dsn, stop):
+                continue
+        except Exception:
+            log.exception("Evidence branches could not be saved and will be retried")
+            stop.wait(2)
+        stop.wait(poll)
+
+
+def update_recovery(db, incident, start, reading, healthy, node):
+    streak = incident["healthy_windows"] + 1 if healthy else 0
+    recovered = start if streak >= 2 else None
+    recovery = ({"recovery": "The affected rate or metric returned to its baseline range for two observed windows."}
+                if recovered else {})
+    if reading:
+        add_evidence(db, incident["id"], start, "recovery observation", reading, node)
+    db.execute(
+        """update incidents set updated_at = %s, healthy_windows = %s,
+           recovered_at = %s, report = report || %s where id = %s""",
+        (start, streak, recovered, jsonb(recovery), incident["id"]),
+    )
+
+
+def workflow_groups(readings, open_incidents, alerts):
+    groups = []
+    for incident in open_incidents:
+        initial = incident["report"].get("break", {})
+        if initial.get("id") in BY_ID:
+            current = readings.get(BY_ID[initial["id"]], incident["scope"])
+            groups.append({"incident": incident, "completion": current, "alerts": []})
+    for index, step in enumerate(WORKFLOW):
+        relevant = [row for row in alerts if ALERT_STEPS.get(row["metric_id"], -1) >= index]
+        if not relevant:
+            continue
+        chosen = [group["completion"] for group in groups
+                  if group["completion"]["id"] == step.id and group["completion"]["status"] != "steady"]
+        for completion in readings.degraded(step):
+            if (not any(compatible(row["scope"], completion["scope"]) for row in relevant)
+                    or any(compatible(row["scope"], completion["scope"]) for row in chosen)):
+                continue
+            groups.append({"incident": None, "completion": completion, "alerts": []})
+            chosen.append(completion)
+    return groups
+
+
+def assign_workflow_alerts(readings, groups, alerts):
+    remaining = []
+    for row in alerts:
+        stage = ALERT_STEPS.get(row["metric_id"], -1)
+        candidates = [group for group in groups if group["completion"]["status"] == "degraded"
+                      and POSITIONS[group["completion"]["id"]] <= stage
+                      and compatible(group["completion"]["scope"], row["scope"])]
+        if not candidates:
+            remaining.append(row)
+            continue
+        # A local rate fault takes precedence over compatible upstream volume losses.
+        best = max(candidates, key=lambda group: (
+            POSITIONS[group["completion"]["id"]],
+            sum(row["scope"].get(key) == value for key, value in group["completion"]["scope"].items()),
+            group["completion"]["strength"],
+        ))
+        anchor = best["completion"]
+        payload = dict(row)
+        if stage > POSITIONS[anchor["id"]]:
+            local = {**anchor["scope"], **row["scope"]}
+            checks = [readings.get(step, local) for step in WORKFLOW[POSITIONS[anchor["id"]] + 1:stage + 1]]
+            uncertain = [check for check in checks if check["status"] != "steady"]
+            payload["relationship"] = "uncertain" if uncertain else "downstream volume"
+            payload["completion_checks"] = checks
+        else:
+            payload["relationship"] = "same transition"
+        best["alerts"].append(payload)
+    return remaining
+
+
+def open_incident(db, tool, start, baseline, anchor, alerts, model, completion=None):
+    incident_id = db.execute(
+        """insert into incidents (metric_id, scope, opened_at, updated_at)
+           values (%s, %s, %s, %s) returning id""",
+        (anchor["metric_id"], jsonb(anchor["scope"]), start, start),
+    ).fetchone()["id"]
+    report, context = collect_evidence(db, tool, anchor, incident_id, baseline, completion)
+    if model:
+        db.execute("insert into pending_reports values (%s, %s, %s)",
+                   (incident_id, jsonb(context), jsonb(report)))
+        report = {key: report[key] for key in
+                  ("summary", "affected_scope", "path", "first_observable_break") if key in report}
+    if completion:
+        report["break"] = completion
+    else:
+        metric = tool("metric_definition", metric_id=anchor["metric_id"])
+        report["measurement"] = {"observed": anchor["observed"], "expected": anchor["expected"],
+                                 "unit": metric["access"].get("unit", "count")}
+    report["deep_investigation"] = "pending"
+    db.execute("update incidents set report = %s where id = %s", (jsonb(report), incident_id))
+    attach_alerts(db, incident_id, start, [row for row in alerts if row["id"] != anchor.get("id")],
+                  "related anomaly")
+    return incident_id
+
+
+def attach_alerts(db, incident_id, start, alerts, kind):
+    uncertain = {}
+    for row in alerts:
+        add_evidence(db, incident_id, start, kind, row, metric_node(row["metric_id"]))
+        if row.get("relationship") == "uncertain":
+            for check in row.get("completion_checks", ()):
+                if check["status"] != "steady":
+                    uncertain[check["id"]] = check["label"]
+    if uncertain:
+        db.execute("update incidents set report = report || %s where id = %s",
+                   (jsonb({"uncertain_relationships": list(uncertain.values())}), incident_id))
+
+
+def track_other(db, tool, start, baseline, incidents, alerts, model, good_data):
+    for incident in incidents:
+        same = [row for row in alerts if row["metric_id"] == incident["metric_id"]
+                and compatible(row["scope"], incident["scope"])]
+        if same:
+            attach_alerts(db, incident["id"], start, same, "ongoing anomaly")
+            for row in same:
+                alerts.remove(row)
+            update_recovery(db, incident, start, None, False, None)
+            continue
         current = tool("metric_readings", metric_id=incident["metric_id"], start=start,
                        end=start + HOUR, scope=incident["scope"])
         metric = tool("metric_definition", metric_id=incident["metric_id"])
         ratio = metric["calculation"]["op"] in {"ratio", "share"} or metric["access"].get("unit") == "ratio"
-        adequate = (current and current[-1]["value"] is not None and
-                    (not ratio or current[-1]["sample_size"] >= 30))
-        if not adequate or not good_data:
-            db.execute("update incidents set healthy_windows = 0 where id = %s", (incident["id"],))
-            continue
-        streak = incident["healthy_windows"] + 1
-        recovered = start if streak >= 2 else None
-        recovery = {}
-        if recovered:
-            recovery["recovery"] = "The affected segment returned to its baseline range for two observed windows."
-        add_evidence(db, incident["id"], start, "recovery observation", current[-1],
-                     metric_node(incident["metric_id"]))
-        db.execute(
-            """update incidents set updated_at = %s, healthy_windows = %s,
-               recovered_at = %s, report = report || %s where id = %s""",
-            (start, streak, recovered, jsonb(recovery), incident["id"]),
-        )
+        reading = current[-1] if current else None
+        healthy = (good_data and reading and reading["value"] is not None
+                   and (not ratio or reading["sample_size"] >= 30))
+        update_recovery(db, incident, start, reading, healthy, metric_node(incident["metric_id"]))
 
+    while alerts:
+        # Keep independent signals when there is no measured workflow break to explain them.
+        anchor = max(alerts, key=lambda row: row["score"] * (1 + .15 * len(row["scope"])))
+        cohort = [row for row in alerts if row["metric_id"] == anchor["metric_id"]
+                  and compatible(row["scope"], anchor["scope"])]
+        for row in cohort:
+            alerts.remove(row)
+        open_incident(db, tool, start, baseline, anchor, cohort, model)
+
+
+def track(db, start, anomalies, model=None):
+    open_incidents = db.execute("select * from incidents where recovered_at is null order by id").fetchall()
+    if not anomalies and not open_incidents:
+        return
     baseline = datetime.fromisoformat(state(db, "baseline_through"))
-    while pending:
-        anchor = max(pending, key=lambda row: row["score"] * (1 + 0.15 * len(row["scope"])))
-        nearby = [row for row in pending if related(graph, anchor, row)]
-        incident = db.execute(
-            """insert into incidents (metric_id, scope, opened_at, updated_at)
-               values (%s, %s, %s, %s) returning id""",
-            (anchor["metric_id"], jsonb(anchor["scope"]), start, start),
-        ).fetchone()["id"]
-        report, context = collect_evidence(db, tool, anchor, incident, baseline)
-        for row in nearby:
-            pending.remove(row)
-            if row != anchor:
-                add_evidence(db, incident, start, "related anomaly", row, metric_node(row["metric_id"]))
-        if model:
-            db.execute("insert into pending_reports values (%s, %s, %s)",
-                       (incident, jsonb(context), jsonb(report)))
-            report = {key: report[key] for key in
-                      ("summary", "affected_scope", "path", "first_observable_break") if key in report}
-        db.execute("update incidents set report = %s where id = %s", (jsonb(report), incident))
+    tool = observation_tool(db)
+    health = tool("metric_readings", metric_id="data_completeness_ratio", start=start, end=start + HOUR)
+    good_data = not health or (health[-1]["value"] is not None and health[-1]["value"] >= 0.97)
+    remaining = list(anomalies)
+    accounted = set()
+    if any(row["metric_id"] in ALERT_STEPS for row in anomalies) or any(
+            incident["report"].get("break", {}).get("id") in BY_ID for incident in open_incidents):
+        readings = Readings(db, start, baseline)
+        groups = workflow_groups(readings, open_incidents, anomalies if good_data else [])
+        remaining = assign_workflow_alerts(readings, groups, remaining)
+        for group in groups:
+            completion, attached = group["completion"], group["alerts"]
+            step = BY_ID[completion["id"]]
+            incident = group["incident"]
+            if incident:
+                accounted.add(incident["id"])
+                attach_alerts(db, incident["id"], start, attached, "ongoing anomaly")
+                update_recovery(db, incident, start, completion,
+                                good_data and completion["status"] == "steady", metric_node(step.metric))
+            else:
+                anchor = next((row for row in attached if row["metric_id"] == step.metric
+                               and row["scope"] == completion["scope"]), None)
+                if not anchor:
+                    anchor = {"metric_id": step.metric, "window_start": start, "scope": completion["scope"],
+                              "observed": completion["observed"], "expected": completion["expected"],
+                              "sample_size": completion["eligible"]}
+                open_incident(db, tool, start, baseline, anchor, attached, model, completion)
+
+    others = [incident for incident in open_incidents if incident["id"] not in accounted]
+    track_other(db, tool, start, baseline, others, remaining, model, good_data)

@@ -110,8 +110,9 @@ def materialize(db, window_start=None, metric_id=None):
                               for scope, value, size, details in metric_readings(definition, facts))
         if custom:
             events = db.execute(
-                "select activity, attrs, occurred_at, ingested_at from events where window_start = %s",
-                (start,),
+                """select activity, attrs, occurred_at, ingested_at from events
+                   where window_start = %s and ingested_at <= %s""",
+                (start, window["observation_snapshot"] or end + MAX_MATURITY),
             ).fetchall()
             by_activity = defaultdict(list)
             for event in events:

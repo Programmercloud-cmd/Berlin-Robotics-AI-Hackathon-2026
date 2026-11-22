@@ -15,9 +15,12 @@ const segment = (scope) => Object.entries(scope || {}).filter(([, value]) => val
   .join(" · ") || "Marketplace-wide";
 const effects = {
   payment_timeout: ["More payment attempts time out", "timeout probability"],
+  payment_success_delay: ["Authorized payment receipts arrive 90 minutes late", "of successful receipts delayed"],
+  search_rollout: ["Release faster search to a share of eligible shoppers", "assigned to the release"],
   reduce_completions: ["Fewer successful completions", "of otherwise successful completions prevented"],
 };
 const transitions = {
+  search: "Search request → search results",
   product_view: "Product page request → successful product view",
   cart_add: "Add-to-cart request → successful cart addition",
   payment: "Payment attempt → payment outcome",
@@ -36,6 +39,14 @@ let runKey = null;
 let previewId = null;
 let latestPlan = null;
 let previewKey = null;
+let selectedRunId = null;
+let workflowKey = null;
+let readingsKey = null;
+let readingResult = null;
+let readingsUnavailable = false;
+let refreshSequence = 0;
+let polling;
+const active = (run) => ["queued", "publishing"].includes(run.status);
 
 function fields(rows) {
   const list = element("dl");
@@ -101,7 +112,8 @@ function renderChat() {
       review.addEventListener("click", () => {
         previewId = item.id;
         renderPreview();
-        byId("plan-preview").scrollIntoView({ block: "nearest" });
+        renderWorkflow();
+        byId("workflow").scrollIntoView({ block: "start" });
       });
       turn.append(review);
     }
@@ -109,11 +121,16 @@ function renderChat() {
   }
 }
 
-function planFields(plan) {
+function operatorPremise(plan, planId) {
+  return state.messages?.find((item) => item.id === planId)?.prompt || plan.premise;
+}
+
+function planFields(plan, planId) {
   const transition = plan.transition || (plan.fault_stage === "product_page_load" ? "product_view" : "payment");
   const [effect, severity] = effects[plan.effect || (transition === "payment" ? "payment_timeout" : "reduce_completions")];
+  const premise = operatorPremise(plan, planId);
   return [
-    ...(plan.premise ? [["Lab premise", plan.premise]] : []),
+    ...(premise ? [["Lab premise", premise]] : []),
     ["Simulator effect", effect],
     ["Transition", transitions[transition]],
     ["Affected traffic", segment(plan.scope)],
@@ -136,9 +153,12 @@ function renderPreview() {
   apply.disabled = state.phase !== "ready" || state.busy;
   apply.addEventListener("click", async () => {
     apply.disabled = true;
-    if (await action("/api/plans/" + item.id + "/apply")) {
+    const response = await action("/api/plans/" + item.id + "/apply");
+    if (response) {
+      selectedRunId = response.id;
       previewId = null;
       renderPreview();
+      renderWorkflow();
     } else apply.disabled = false;
   });
   const exportButton = element("button", "Download JSON", "secondary");
@@ -147,10 +167,137 @@ function renderPreview() {
   close.addEventListener("click", () => {
     previewId = null;
     renderPreview();
+    renderWorkflow();
   });
   const actions = element("div", null, "inline");
   actions.append(apply, exportButton, close);
-  target.append(element("h3", replay ? "Replay preview" : "Scenario preview"), fields(planFields(item.scenario)), actions);
+  target.append(element("h3", replay ? "Replay preview" : "Scenario preview"), fields(planFields(item.scenario, item.id)), actions);
+}
+
+function renderObservations(target, readings, run) {
+  target.replaceChildren(element("h3", "Observed during the scenario"));
+  if (!readings) {
+    const message = readingsUnavailable ? "Run readings are unavailable." : "Waiting for published scenario windows.";
+    target.append(element("p", message));
+    return;
+  }
+  const { count, rate } = labWorkflow;
+  if (readings.transition === "search") {
+    const wrapper = element("div", null, "workflow-table");
+    const table = element("table");
+    const header = element("tr");
+    for (const label of ["Cohort", "Search sessions", "Recommendation exposure", "Direct orders",
+      "Recommendation-assisted orders", "Total orders"]) {
+      const cell = element("th", label);
+      cell.scope = "col";
+      header.append(cell);
+    }
+    const head = element("thead");
+    head.append(header);
+    const body = element("tbody");
+    for (const arm of ["rollout", "holdout"]) {
+      const row = element("tr");
+      row.dataset.cohort = arm;
+      const cohort = readings.cohorts[arm];
+      const title = element("th", arm === "rollout" ? "Rollout" : "Holdout");
+      title.scope = "row";
+      const values = cohort ? [
+        count(cohort.sessions),
+        count(cohort.exposed) + " · " + rate(cohort.exposed, cohort.sessions),
+        count(cohort.direct_orders), count(cohort.recommendation_orders), count(cohort.orders),
+      ] : Array(5).fill("—");
+      row.append(title, ...values.map((value) => element("td", value)));
+      body.append(row);
+    }
+    table.append(head, body);
+    wrapper.append(table);
+    target.append(wrapper);
+    const unclassified = Object.values(readings.cohorts).reduce((sum, cohort) => sum + cohort.unclassified_orders, 0);
+    if (unclassified) target.append(element("p", count(unclassified) + " orders have no verified purchase path."));
+    return;
+  }
+
+  const c = readings.counts;
+  if (readings.transition === "payment") {
+    target.append(fields([
+      ["Payment attempts", count(c.attempted)],
+      ["Authorized", count(c.authorized) + " · " + rate(c.authorized, c.attempted)],
+      ["Declined / timed out", count(c.declined) + " / " + count(c.timed_out)],
+      ["Orders confirmed", count(c.confirmed)],
+      ["Receipts at cutoff", count(c.receipts_at_cutoff) + " received · " + count(c.in_transit_at_cutoff) + " in transit"],
+      ["Delivery since cutoff", count(c.received_since_cutoff) + " arrived · " + count(c.in_transit_now) + " still in transit"],
+    ]));
+    target.append(element("p", "Receipt cutoff " + time(readings.effect_cutoff) + " · Observed through " + time(readings.observed_through)));
+  } else {
+    target.append(fields([
+      ["Requests", count(c.requested)],
+      ["Successful completions", count(c.completed) + " · " + rate(c.completed, c.requested)],
+      ["Failed requests", count(c.failed)],
+    ]));
+  }
+  if (active(run) && run.published < run.scenario.duration_hours) {
+    target.append(element("p", "Readings are based on the scenario windows published so far."));
+  }
+}
+
+function workflowSelection() {
+  const draft = state.messages?.find((item) => item.id === previewId && item.scenario);
+  if (draft) return { plan: draft.scenario, phase: "preview" };
+  const scenarios = (state.runs || []).filter((run) => run.scenario);
+  const run = scenarios.find((item) => item.id === selectedRunId) || scenarios.find(active) || scenarios[0];
+  if (!run) return { phase: "base" };
+  let phase = "results";
+  if (run.status === "queued") phase = "queued";
+  else if (run.status === "failed") phase = "stopped";
+  else if (run.status === "publishing") {
+    const clock = Date.parse(run.window_start || run.start_at);
+    phase = clock >= Date.parse(run.start_at) && clock < Date.parse(run.end_at) ? "running" : "recovery";
+  }
+  return { plan: run.scenario, phase, run };
+}
+
+async function loadWorkflowReadings(run, key) {
+  try {
+    const response = await fetch("/api/runs/" + run.id + "/workflow", { cache: "no-store" });
+    if (!response.ok) throw new Error();
+    const readings = await response.json();
+    if (readingsKey !== key) return;
+    readingResult = readings;
+  } catch {
+    if (readingsKey !== key) return;
+    readingsUnavailable = true;
+  }
+  renderWorkflow();
+}
+
+function renderWorkflow() {
+  const { plan, phase, run } = workflowSelection();
+  const key = run?.published ? JSON.stringify([run.id, run.published, state.next_window]) : null;
+  if (key !== readingsKey) {
+    const sameRun = key && readingsKey && JSON.parse(readingsKey)[0] === run.id;
+    readingsKey = key;
+    if (!sameRun) readingResult = null;
+    readingsUnavailable = false;
+    if (key) loadWorkflowReadings(run, key);
+  }
+  const signature = JSON.stringify([plan, phase, run?.id, run?.published, readingResult, readingsUnavailable]);
+  if (signature === workflowKey) return;
+  workflowKey = signature;
+  const badge = byId("workflow-status");
+  const labels = { preview: "Preview", queued: "Queued", running: "Running", recovery: "Recovery",
+    results: "Run results", stopped: "Stopped" };
+  badge.hidden = !plan;
+  badge.textContent = labels[phase] || "";
+  badge.dataset.phase = phase;
+  byId("workflow-details").hidden = !plan;
+  const settings = byId("workflow-plan");
+  const observations = byId("workflow-readings");
+  settings.hidden = observations.hidden = !run;
+  if (run) {
+    settings.replaceChildren(element("h3", "Scenario settings"), fields(planFields(plan, run.plan_id)));
+    renderObservations(observations, readingResult, run);
+  }
+  labWorkflow.update(plan, phase, readingResult);
 }
 
 function renderTimeline(run) {
@@ -194,13 +341,25 @@ function renderRuns() {
     else box.append(element("p", run.status === "queued" ? "Queued." :
       run.published + " of " + run.total + " virtual windows published."));
     if (run.scenario) {
-      box.append(element("h4", "Applied plan"), fields(planFields(run.scenario)), renderTimeline(run));
+      box.append(element("h4", "Applied plan"), fields(planFields(run.scenario, run.plan_id)), renderTimeline(run));
       const result = run.evaluation || {};
+      const actions = element("div", null, "inline");
+      const map = element("button", "Show on map", "secondary");
+      map.type = "button";
+      map.addEventListener("click", () => {
+        previewId = null;
+        selectedRunId = run.id;
+        renderPreview();
+        renderWorkflow();
+        byId("workflow").scrollIntoView({ block: "start" });
+      });
+      actions.append(map);
       if (result.incident_id && state.eye_url) {
         const incident = element("a", "View Eye incident #" + result.incident_id);
         incident.href = new URL("?incident=" + encodeURIComponent(result.incident_id), state.eye_url);
-        box.append(incident);
+        actions.append(incident);
       }
+      box.append(actions);
     } else if (run.start_at) {
       box.append(fields([["Start", time(run.start_at)], ["End", time(run.end_at)]]));
     }
@@ -209,10 +368,13 @@ function renderRuns() {
 }
 
 async function refresh() {
+  const request = ++refreshSequence;
   try {
     const response = await fetch("/api/lab", { cache: "no-store" });
     if (!response.ok) throw new Error("Lab status is temporarily unavailable.");
-    state = await response.json();
+    const snapshot = await response.json();
+    if (request !== refreshSequence) return;
+    state = snapshot;
     byId("status").textContent = state.error || phases[state.phase];
     byId("status-dot").classList.toggle("connected", state.phase === "ready");
     byId("eye-link").hidden = !state.eye_url;
@@ -227,13 +389,19 @@ async function refresh() {
     const newest = [...state.messages].reverse().find((item) => item.scenario);
     if (newest && newest.id !== latestPlan) {
       latestPlan = newest.id;
-      previewId = newest.id;
+      if (!state.runs.some((run) => run.plan_id === newest.id)) previewId = newest.id;
     }
     renderChat();
     renderPreview();
     renderRuns();
+    renderWorkflow();
   } catch (error) {
-    byId("status").textContent = error.message;
+    if (request === refreshSequence) byId("status").textContent = error.message;
+  } finally {
+    if (request === refreshSequence) {
+      clearTimeout(polling);
+      polling = setTimeout(refresh, state.busy ? 300 : 1500);
+    }
   }
 }
 
@@ -258,7 +426,8 @@ byId("replay").addEventListener("submit", async (event) => {
     if (imported) {
       previewId = imported.id;
       renderPreview();
-      byId("plan-preview").scrollIntoView({ block: "nearest" });
+      renderWorkflow();
+      byId("workflow").scrollIntoView({ block: "start" });
     }
   } catch {
     showError(new Error("Choose a valid scenario JSON file."));
@@ -266,4 +435,3 @@ byId("replay").addEventListener("submit", async (event) => {
 });
 
 refresh();
-setInterval(refresh, 1500);

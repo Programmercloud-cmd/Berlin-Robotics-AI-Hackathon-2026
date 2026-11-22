@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from eye.db import connect, setup, state
-from eye.lab_results import evaluate
+from eye.lab_results import evaluate, workflow_readings
 from eye.model import configured_devin
 from eye.scenario import LAB_SEED, SCENARIO_PROMPT, Scenario, ScenarioReply
 from eye.simulator import HOUR, traffic_cycle
@@ -250,6 +250,15 @@ class Lab:
                           pattern_day=traffic_cycle(upcoming)[1] + 1, eye_through=checked)
         return result
 
+    def run_workflow(self, identifier):
+        with self.lock:
+            selected = next((run.copy() for run in self.runs if run["id"] == identifier and run["scenario"]), None)
+            dsn = self.dsn
+        if not selected:
+            raise HTTPException(404, "No scenario run found.")
+        with connect(dsn) as db:
+            return workflow_readings(db, selected)
+
 
 class ChatRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=1500)
@@ -291,6 +300,10 @@ def make_lab_app(eye_port=8000):
     @app.get("/api/lab")
     def snapshot():
         return lab.snapshot()
+
+    @app.get("/api/runs/{identifier}/workflow")
+    def run_workflow(identifier: str):
+        return lab.run_workflow(identifier)
 
     @app.post("/api/chat", status_code=202, dependencies=[Depends(local_action)])
     def chat(request: ChatRequest):

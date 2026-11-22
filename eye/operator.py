@@ -1,4 +1,4 @@
-"""Local operator controls for the disposable PostgreSQL payment rehearsal."""
+"""Local operator controls for the test lab."""
 
 import logging
 import signal
@@ -18,11 +18,10 @@ PHASES = {"postgres", "baseline", "discovery", "dashboard", "failed"}
 LAB_URL = "http://127.0.0.1:8002/"
 
 
-class Rehearsal:
+class LabLauncher:
     def __init__(self):
         self.lock = Lock()
         self.process = None
-        self.kind = None
         self.phase = "idle"
 
     def status(self):
@@ -33,27 +32,23 @@ class Rehearsal:
                 phase = "failed"
             elif phase == "dashboard" and port_open(8000):
                 phase = "ready"
-            lab_ready = self.kind == "lab" and exit_code is None and port_open(8002)
+            lab_ready = self.process is not None and exit_code is None and port_open(8002)
             return {"phase": phase, "exit_code": exit_code, "eye_url": EYE_URL if phase == "ready" else None,
                     "lab_url": LAB_URL if lab_ready else None}
 
-    def start(self, kind):
+    def start(self):
         with self.lock:
-            if kind == "lab" and self.kind != "lab" and port_open(8002):
-                raise HTTPException(409, "Port 8002 is in use. Stop the existing test lab first.")
             if self.process and self.process.poll() is None:
-                if self.phase not in {"dashboard", "failed"}:
-                    raise HTTPException(409, "A rehearsal is starting.")
+                if self.phase != "failed":
+                    return
                 self._stop()
+            if port_open(8002):
+                raise HTTPException(409, "Port 8002 is in use. Open or stop the existing test lab.")
             if port_open(8000):
                 raise HTTPException(409, "Port 8000 is in use. Stop the existing dashboard first.")
-            if kind == "lab" and port_open(8002):
-                raise HTTPException(409, "Port 8002 is in use. Stop the existing test lab first.")
             self.phase = "starting"
-            self.kind = kind
-            command = ["lab"] if kind == "lab" else ["demo", "--local", "--operator-progress"]
             self.process = subprocess.Popen(
-                [sys.executable, "-m", "eye", *command],
+                [sys.executable, "-m", "eye", "lab"],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             )
             Thread(target=self._read_progress, args=(self.process,), daemon=True).start()
@@ -75,7 +70,7 @@ class Rehearsal:
             try:
                 self.process.wait(timeout=12)
             except subprocess.TimeoutExpired:
-                raise HTTPException(409, "The previous rehearsal is still shutting down.") from None
+                raise HTTPException(409, "The test lab is still shutting down.") from None
 
     def close(self):
         with self.lock:
@@ -83,14 +78,14 @@ class Rehearsal:
 
 
 def make_operator_app():
-    rehearsal = Rehearsal()
+    launcher = LabLauncher()
 
     @asynccontextmanager
     async def lifespan(app):
         try:
             yield
         finally:
-            rehearsal.close()
+            launcher.close()
 
     app = FastAPI(title="Eye of the System Operator", lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
@@ -107,18 +102,13 @@ def make_operator_app():
     def theme_script():
         return FileResponse(Path(__file__).with_name("static") / "theme.js", media_type="text/javascript")
 
-    @app.get("/api/rehearsal")
+    @app.get("/api/test-lab")
     def status():
-        return rehearsal.status()
-
-    @app.post("/api/rehearsal", status_code=202, dependencies=[Depends(local_action)])
-    def start():
-        rehearsal.start("rehearsal")
-        return rehearsal.status()
+        return launcher.status()
 
     @app.post("/api/test-lab", status_code=202, dependencies=[Depends(local_action)])
     def start_lab():
-        rehearsal.start("lab")
-        return rehearsal.status()
+        launcher.start()
+        return launcher.status()
 
     return app

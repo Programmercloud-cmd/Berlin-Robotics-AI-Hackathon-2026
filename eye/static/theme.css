@@ -8,6 +8,7 @@
   --line: #ded9d2;
   --accent: #b95318;
   --focus: #1769aa;
+  --incident: #762a66;
   --green: #337056;
   --danger: #9e372d;
   --font: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -29,6 +30,7 @@
   --line: #403c37;
   --accent: #ef8a4c;
   --focus: #75bfff;
+  --incident: #f0a4db;
   --green: #8bc4a2;
   --danger: #ffaca1;
 }
@@ -46,12 +48,17 @@ a { color: var(--accent); text-underline-offset: .2em; }
 .brand-mark::before, .eye-icon::before { content: ""; width: .83rem; height: .83rem; border: 1px solid currentColor; border-radius: 68% 3%; transform: rotate(45deg); }
 .brand-mark::after, .eye-icon::after { content: ""; position: absolute; width: .28rem; height: .28rem; background: currentColor; border-radius: 50%; }
 .app-bar { border-bottom: 1px solid var(--line); background: var(--surface); }
-.app-bar-row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; min-height: 4rem; }
-.app-bar-tools { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem 1rem; }
+.app-bar-row { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 0 1rem; min-height: 4rem; }
+.app-bar-title { margin: 0; font-size: clamp(1rem, 1.7vw, 1.2rem); line-height: 1.25; font-weight: 650; letter-spacing: -.025em; text-align: center; }
+.app-bar-tools { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: .4rem .85rem; }
 .theme-toggle { padding: .35rem .6rem; border: 1px solid var(--line); border-radius: .35rem; background: var(--surface); color: var(--text); font-size: .82rem; white-space: nowrap; }
 .theme-toggle:hover { background: var(--accent-wash); color: var(--accent); }
 .status-dot { display: inline-block; flex: 0 0 .48rem; width: .48rem; height: .48rem; border-radius: 50%; background: var(--accent); }
 .status-dot.connected { background: var(--green); }
+@media (max-width: 45rem) {
+  .app-bar-row { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: .4rem; padding-block: .55rem; }
+  .app-bar-title { grid-column: 1 / -1; grid-row: 2; }
+}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: .01ms !important; }
 }

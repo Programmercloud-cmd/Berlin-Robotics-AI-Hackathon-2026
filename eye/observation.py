@@ -73,8 +73,9 @@ def make_mcp(dsn=None, *, db=None):
                           'id', o.id, 'type', o.type, 'qualifier', r.qualifier))
                        from event_objects r join objects o on o.id = r.object_id
                        where r.event_id = e.id) as objects
-               from events e
+               from events e join windows w on w.start_at = e.window_start
                where e.window_start = %s and e.attrs @> %s
+                 and e.ingested_at <= coalesce(w.observation_snapshot, w.end_at + interval '15 minutes')
                  and (%s::text[] is null or e.activity = any(%s))
                order by e.occurred_at, e.id limit %s""",
             (window_start, Jsonb(scope or {}), activities, activities, max(1, min(limit, 100))),
@@ -85,7 +86,9 @@ def make_mcp(dsn=None, *, db=None):
         """Read observed activity counts and the ingestion manifest for a window."""
         window = read("select * from windows where start_at = %s", (window_start,), single=True)
         activities = read(
-            """select activity, count(*) as events from events where window_start = %s
+            """select activity, count(*) as events from events e join windows w on w.start_at = e.window_start
+               where e.window_start = %s
+                 and e.ingested_at <= coalesce(w.observation_snapshot, w.end_at + interval '15 minutes')
                group by activity order by activity""",
             (window_start,),
         )

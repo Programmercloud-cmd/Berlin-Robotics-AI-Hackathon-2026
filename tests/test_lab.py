@@ -1,4 +1,5 @@
 import unittest
+from collections import Counter
 from datetime import timedelta
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock
@@ -7,7 +8,7 @@ from pydantic import ValidationError
 
 from eye import simulator
 from eye.db import connect, setup
-from eye.lab_results import evaluate
+from eye.lab_results import evaluate, workflow_readings
 from eye.scenario import Scenario
 
 try:
@@ -62,6 +63,52 @@ class TestLab(unittest.TestCase):
         self.assertEqual(result["incident_id"], 3)
         self.assertEqual(result["seconds_to_alert"], 2)
         self.assertEqual(result["recovery_declared_at"], recovery_time)
+
+    @unittest.skipUnless(get_server, "Install requirements-local.txt for PostgreSQL tests.")
+    def test_payment_receipts_distinguish_gateway_timeouts_from_reporting_delay(self):
+        with TemporaryDirectory(prefix="eye-lab-receipts-") as directory:
+            server = get_server(directory + "/data")
+            try:
+                with connect(server.get_uri()) as db:
+                    setup(db)
+                    for effect in ("payment_timeout", "payment_success_delay"):
+                        with self.subTest(effect=effect), db.transaction(force_rollback=True):
+                            plan = Scenario(effect=effect, transition="payment", severity=0.8,
+                                            scope=simulator.PAYMENT_SCOPE, duration_hours=1)
+                            simulator.emit(db, simulator.DEMO_START, patterned=True, scenario=plan)
+                            rows = db.execute(
+                                """select activity, ingested_at > observation_snapshot as late, count(*) as n
+                                   from events join windows on window_start = start_at
+                                   where attrs->>'country' = 'DE' and attrs->>'platform' = 'mobile'
+                                     and attrs->>'provider' = 'Stripe'
+                                     and activity in ('payment_succeeded', 'payment_timed_out', 'order_confirmed')
+                                   group by activity, late"""
+                            ).fetchall()
+                            counts = Counter({(row["activity"], row["late"]): row["n"] for row in rows})
+                            start = simulator.DEMO_START
+                            run = {"start_at": start.isoformat(), "end_at": (start + simulator.HOUR).isoformat(),
+                                   "published": 1, "scenario": plan.model_dump(exclude_none=True)}
+                            mapped = workflow_readings(db, run)["counts"]
+                            self.assertEqual(mapped["timed_out"], counts["payment_timed_out", False])
+                            self.assertEqual(mapped["in_transit_at_cutoff"], counts["payment_succeeded", True])
+                            self.assertEqual(mapped["authorized"], mapped["confirmed"])
+                            if effect == "payment_timeout":
+                                self.assertGreater(counts["payment_timed_out", False], 40)
+                                self.assertEqual(counts["payment_succeeded", True], 0)
+                            else:
+                                self.assertGreater(counts["payment_succeeded", True], 40)
+                                self.assertLess(counts["payment_timed_out", False], 15)
+                                self.assertEqual(counts["order_confirmed", False],
+                                                 counts["payment_succeeded", False] + counts["payment_succeeded", True])
+                                self.assertEqual(mapped["in_transit_now"], mapped["in_transit_at_cutoff"])
+                                simulator.emit(db, start + simulator.HOUR, patterned=True)
+                                simulator.emit(db, start + 2 * simulator.HOUR, patterned=True)
+                                later = workflow_readings(db, run)["counts"]
+                                self.assertEqual(later["received_since_cutoff"], mapped["in_transit_at_cutoff"])
+                                self.assertEqual(later["confirmed"], mapped["confirmed"])
+                                self.assertEqual(later["in_transit_now"], 0)
+            finally:
+                server.cleanup()
 
     @unittest.skipUnless(get_server, "Install requirements-local.txt for PostgreSQL tests.")
     def test_completion_losses_preserve_attempts_and_the_upstream_step(self):

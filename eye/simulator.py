@@ -44,7 +44,7 @@ def traffic_cycle(start):
 
 
 def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disruption=False,
-         patterned=False, scenario=None):
+         patterned=False, scenario=None, scenarios=()):
     start = start.astimezone(timezone.utc)
     clock = int(start.timestamp())
     rng = Random(f"{seed}:{clock}")
@@ -53,6 +53,7 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
     transition_events_rng = Random(f"{seed}:{clock}:transition-events")
     page_events_rng = transition_events_rng if patterned else Random(f"{seed}:{clock}:product-page")
     completion_rng = Random(f"{seed}:{clock}:completion-loss")
+    receipt_rng = Random(f"{seed}:{clock}:payment-receipts")
     prefix = f"{clock}:"
     previous = db.execute(
         """select attrs from events where activity = 'inventory_snapshot' and window_start =
@@ -73,10 +74,10 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
     def add_object(key, kind, attrs):
         objects.append((key, kind, Jsonb(attrs)))
 
-    def add_event(activity, elapsed, attrs, references, source_rng=rng):
-        identifier = f"{prefix}event-{len(events)}"
+    def add_event(activity, elapsed, attrs, references, source_rng=rng, *, identifier=None, receipt_delay=0):
+        identifier = identifier or f"{prefix}event-{len(events)}"
         occurred = start + elapsed
-        ingested = occurred + timedelta(milliseconds=source_rng.randint(150, 4750))
+        ingested = occurred + timedelta(minutes=receipt_delay, milliseconds=source_rng.randint(150, 4750))
         metadata = {"source_id": SOURCES.get(activity, "storefront"), "event_type": activity}
         events.append((identifier, activity, occurred, ingested, start, Jsonb({**attrs, **metadata})))
         links.extend((identifier, key, qualifier) for key, qualifier in references)
@@ -86,14 +87,19 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
     if patterned:
         cycle, _ = traffic_cycle(start)
         seasonal *= cycle * Random(f"{seed}:{clock}:traffic").uniform(0.98, 1.02)
-    fault_scope = scenario.scope.model_dump(exclude_none=True) if scenario else {}
+    plans = (*scenarios, scenario) if scenario else scenarios
+    effects = {plan.transition: (plan, plan.scope.model_dump(exclude_none=True)) for plan in plans}
 
-    def in_scope(attrs):
-        return all(attrs.get(key) == value for key, value in fault_scope.items())
+    def severity(transition, attrs, effect):
+        if transition in effects:
+            plan, scope = effects[transition]
+            if plan.effect == effect and all(attrs.get(key) == value for key, value in scope.items()):
+                return plan.severity
+        return None
 
     def completion_blocked(transition, attrs):
-        return (scenario and scenario.effect == "reduce_completions" and scenario.transition == transition
-                and in_scope(attrs) and completion_rng.random() < scenario.severity)
+        probability = severity(transition, attrs, "reduce_completions")
+        return probability is not None and completion_rng.random() < probability
 
     volume = round(600 * seasonal * traffic)
     for index in range(volume):
@@ -116,9 +122,12 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
 
         add_object(session, "session", journey)
         add_event("session_started", elapsed, journey, session_link)
+        offer = None
+        offer_time = elapsed
+        recommendation = None
+        abandons = False
         if catalog_rng.random() < 0.30:
-            feed_sku = catalog_rng.choice(tuple(ALL_PRODUCTS))
-            feed.append((elapsed, feed_sku, journey, session_link, catalog_rng.random() < 0.35))
+            offer = (catalog_rng.choice(tuple(ALL_PRODUCTS)), catalog_rng.random() < 0.35)
         if search and search_rng.random() < 0.76:
             request = f"{base}search"
             add_object(request, "search", journey)
@@ -128,10 +137,29 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
             results = 0 if search_rng.random() < missing else search_rng.randint(2, 40)
             search_attrs = {**journey, "search_id": request, "query_language": country.lower(),
                             "result_count": results}
+            click_time = elapsed + timedelta(seconds=3)
+            if patterned or "search" in effects:
+                route_rng = Random(f"{seed}:{clock}:recommendation-route:{index}")
+                rollout = route_rng.random() < (severity("search", journey, "search_rollout") or 0)
+                response_ms = route_rng.randint(95, 180) if rollout else route_rng.randint(510, 740)
+                prefers_recommendation = route_rng.random() < 0.55
+                search_attrs.update(response_ms=response_ms, search_release="search-v2" if rollout else "search-v1",
+                                    experiment_arm="rollout" if rollout else "holdout")
+                click_time = elapsed + timedelta(milliseconds=1350 + response_ms)
+                # Recommendations render while search is pending. A fast response skips that slot.
+                offer_time = elapsed + timedelta(milliseconds=1300)
+                if response_ms < 300:
+                    offer = None
+                    abandons = prefers_recommendation and route_rng.random() >= 0.32
+                elif prefers_recommendation:
+                    offer = (sku, True)
+                    recommendation = f"{session}:recommendation"
             add_event("search_requested", elapsed + timedelta(seconds=1), search_attrs, search_links, search_rng)
             if results and search_rng.random() < 0.72:
-                add_event("search_result_clicked", elapsed + timedelta(seconds=3),
+                add_event("search_result_clicked", click_time,
                           {**item, **search_attrs}, [*search_links, (sku, "selected result")], search_rng)
+        if offer:
+            feed.append((offer_time, *offer, journey, session_link, recommendation))
         add_event("product_page_requested", elapsed + timedelta(seconds=2), item, product_link, page_events_rng)
         if shopper_rng.random() >= 0.97 or completion_blocked("product_view", journey):
             add_event("product_page_load_failed", elapsed + timedelta(seconds=5),
@@ -143,7 +171,7 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
             add_event("product_viewed", elapsed + timedelta(seconds=13),
                       {**journey, "sku": viewed, **ALL_PRODUCTS[viewed]},
                       [*session_link, (viewed, "product")])
-        if shopper_rng.random() >= 0.83:
+        if shopper_rng.random() >= 0.83 or abandons:
             continue
         add_event("cart_add_requested", elapsed + timedelta(seconds=20), item, product_link, transition_events_rng)
         if completion_blocked("cart_add", journey):
@@ -164,8 +192,7 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
         add_event("payment_attempted", elapsed + timedelta(seconds=45), commerce, payment_links)
         payment_affected = fault and all(checkout[key] == value for key, value in PAYMENT_SCOPE.items())
         timeout_rate = 0.63 if payment_affected else 0.022
-        if scenario and scenario.effect == "payment_timeout" and in_scope(checkout):
-            timeout_rate = scenario.severity
+        timeout_rate = severity("payment", checkout, "payment_timeout") or timeout_rate
         outcome = shopper_rng.random()
         if outcome < timeout_rate:
             add_event("payment_timed_out", elapsed + timedelta(seconds=62),
@@ -174,26 +201,32 @@ def emit(db, start, seed=42, traffic=1.0, fault=False, search=True, search_disru
             add_event("payment_declined", elapsed + timedelta(seconds=47),
                       {**commerce, "response": "card_declined"}, payment_links)
         else:
+            delay_probability = severity("payment", checkout, "payment_success_delay")
+            delayed = delay_probability is not None and receipt_rng.random() < delay_probability
             add_event("payment_succeeded", elapsed + timedelta(seconds=47),
-                      {**commerce, "response": "authorized"}, payment_links)
+                      {**commerce, "response": "authorized"}, payment_links, receipt_delay=90 if delayed else 0)
             value = item["price_cents"]
             discount_rng = shopper_rng if patterned else catalog_rng
             line = {**commerce, "order_line_id": f"{order}:line-1", "quantity": 1, "list_value_cents": value,
                     "fee_cents": value * 12 // 100, "discount_cents": 150 if discount_rng.random() < 0.2 else 0,
-                    "operating_cost_cents": 40 + value // 100}
+                    "operating_cost_cents": 40 + value // 100,
+                    "order_path": "recommendation" if recommendation else "direct"}
+            if recommendation:
+                line["recommendation_impression_id"] = recommendation
             confirmation = elapsed + timedelta(seconds=50)
             add_event("order_confirmed", confirmation, line, payment_links)
             sales[sku].append(confirmation)
             stock[sku] -= 1
 
-    for elapsed, sku, journey, session_link, clicked in feed:
+    for elapsed, sku, clicked, journey, session_link, recommendation in feed:
         available = max(0, opening_stock.get(sku, 0) - sum(sale <= elapsed for sale in sales[sku]))
         attrs = {**journey, **ALL_PRODUCTS[sku], "recommendation_model_version": "feed-v1",
                  "available_units": available}
         references = [*session_link, (sku, "recommended product")]
-        impression = add_event("feed_impression", elapsed, attrs, references, catalog_rng)
+        impression = add_event("feed_impression", elapsed, attrs, references, catalog_rng, identifier=recommendation)
         if clicked:
-            add_event("feed_clicked", elapsed + timedelta(seconds=4), {**attrs, "impression_id": impression},
+            click_time = elapsed + (timedelta(milliseconds=250) if recommendation else timedelta(seconds=4))
+            add_event("feed_clicked", click_time, {**attrs, "impression_id": impression},
                       references, catalog_rng)
 
     for country, channel in product(("DE", "FR"), ("paid_search", "display")):

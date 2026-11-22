@@ -19,8 +19,8 @@ class Scope(BaseModel):
 class Scenario(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    effect: Literal["reduce_completions", "payment_timeout"]
-    transition: Literal["product_view", "cart_add", "payment"]
+    effect: Literal["reduce_completions", "payment_timeout", "payment_success_delay", "search_rollout"]
+    transition: Literal["product_view", "cart_add", "payment", "search"]
     scope: Scope = Field(default_factory=Scope)
     severity: float = Field(ge=0.1, le=0.95)
     duration_hours: int = Field(ge=1, le=24)
@@ -41,8 +41,14 @@ class Scenario(BaseModel):
 
     @model_validator(mode="after")
     def validate_transition(self):
-        if (self.effect == "payment_timeout") != (self.transition == "payment"):
-            raise ValueError("Payment uses payment_timeout; product views and cart additions use reduce_completions.")
+        supported = {
+            "product_view": {"reduce_completions"},
+            "cart_add": {"reduce_completions"},
+            "payment": {"payment_timeout", "payment_success_delay"},
+            "search": {"search_rollout"},
+        }
+        if self.effect not in supported[self.transition]:
+            raise ValueError(f"{self.effect} is unavailable at the {self.transition} transition.")
         if self.transition != "payment" and self.scope.provider:
             raise ValueError("A payment provider can only scope payment traffic.")
         return self
@@ -62,6 +68,12 @@ either product_view (a page request reaches a successful product view) or
 cart_add (an add-to-cart request reaches a successful cart addition). Severity
 is the fraction of otherwise successful completions prevented at that transition.
 Use effect payment_timeout with transition payment and an absolute timeout probability.
+Use effect payment_success_delay with transition payment when successful payment
+receipts arrive late. Severity is the fraction delayed by 90 virtual minutes.
+Use effect search_rollout with transition search to try a faster search release.
+Severity is the share of eligible shoppers assigned the faster release, with the
+rest staying on the existing release. For a request about a faster release and
+recommendation-assisted sales, simulate the release and let Eye observe the effect.
 A cause need not have a graph node. 'Frankfurt product pages fail to load' maps to
 product_view and 'people struggle to add products to their cart' maps to cart_add.
 Both use scope {} unless a customer traffic restriction is explicit. The simulator

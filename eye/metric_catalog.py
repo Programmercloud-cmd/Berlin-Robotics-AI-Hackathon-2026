@@ -137,7 +137,7 @@ CATALOG = {item["id"]: item for item in [
     define("event_ingestion_lag_seconds", "Event ingestion lag", "95th-percentile delay from event occurrence to ingestion.",
            "seconds", DATA, "ingestion_receipts", "lag", direction="up"),
     define("data_completeness_ratio", "Data completeness", "Received unique events per source-manifest count.",
-           "ratio", DATA, "source_manifests", "completeness", direction="down"),
+           "ratio", DATA, "source_manifests", "completeness", direction="down", alert_scope=DATA),
 ]}
 
 CATALOG["marketplace_contribution"]["access"]["dimension_mapping"] = {

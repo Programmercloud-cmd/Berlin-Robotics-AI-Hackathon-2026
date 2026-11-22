@@ -3,6 +3,8 @@
 import logging
 from datetime import datetime
 
+from psycopg.types.json import Jsonb
+
 from eye import curation, graph, investigation, monitor
 from eye.db import connect, set_state, setup, state
 from eye.metric_catalog import CATALOG, INITIAL_METRICS, LEGACY, STAGED
@@ -15,6 +17,15 @@ def initialize(dsn):
         setup(db)
         previous = state(db, "baseline_through")
         if previous and state(db, "metric_catalog_version") == 1:
+            # Existing baselines already contain source and event-type observations.
+            # Enable alerts on those readings without rebuilding their history.
+            completeness = CATALOG["data_completeness_ratio"]["access"]["alert_dimensions"]
+            db.execute(
+                """update metrics set access = jsonb_set(access, '{alert_dimensions}', %s)
+                   where id = 'data_completeness_ratio'
+                     and access->'alert_dimensions' is distinct from %s""",
+                (Jsonb(completeness), Jsonb(completeness)),
+            )
             return True
         baseline = (datetime.fromisoformat(previous) if previous else
                     db.execute("select max(start_at) as value from windows").fetchone()["value"])
@@ -70,9 +81,12 @@ def step(dsn, model=None):
         new_types = db.execute("""
             select exists (
                 select 1 from events e
+                join windows w on w.start_at = e.window_start
                 join event_objects eo on eo.event_id = e.id
                 join objects o on o.id = eo.object_id
-                where e.window_start = %s and (
+                where e.window_start = %s
+                  and e.ingested_at <= coalesce(w.observation_snapshot, w.end_at + interval '15 minutes')
+                  and (
                     not exists (select 1 from graph_nodes where id = 'activity:' || e.activity)
                     or not exists (select 1 from graph_nodes where id = 'process:' || o.type)
                 )
@@ -82,7 +96,7 @@ def step(dsn, model=None):
             start - datetime.fromisoformat(state(db, "last_discovery"))
         ).total_seconds() >= 43200
         if discover:
-            graph.discover(db)
+            graph.discover(db, through=start)
             set_state(db, "last_discovery", start.isoformat())
         monitor.materialize(db, window_start=start)
         if discover:

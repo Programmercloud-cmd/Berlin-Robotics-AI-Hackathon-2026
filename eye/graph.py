@@ -36,20 +36,26 @@ def attach_measures(db, metric_id, calculation, nodes):
                      {"activity": activity})
 
 
-def discover(db):
+def discover(db, through=None):
     import pandas as pd
     import pm4py
     from pm4py.objects.ocel.obj import OCEL
 
     # A rolling log keeps discovery responsive as the simulation continues.
-    windows = db.execute("select start_at from windows order by start_at desc limit 24").fetchall()
+    windows = db.execute(
+        """select start_at, coalesce(observation_snapshot, end_at + interval '15 minutes') as as_of
+           from windows where (%s::timestamptz is null or start_at <= %s)
+           order by start_at desc limit 24""",
+        (through, through),
+    ).fetchall()
     if not windows:
         return
     starts = [row["start_at"] for row in windows]
+    as_of = windows[0]["as_of"]
     events = db.execute(
         """select id as "ocel:eid", activity as "ocel:activity", occurred_at as "ocel:timestamp"
-        from events where window_start = any(%s) order by occurred_at, id""",
-        (starts,),
+        from events where window_start = any(%s) and ingested_at <= %s order by occurred_at, id""",
+        (starts, as_of),
     ).fetchall()
     if not events:
         return
@@ -59,8 +65,9 @@ def discover(db):
         eo.qualifier as "ocel:qualifier"
         from events e join event_objects eo on eo.event_id = e.id
         join objects o on eo.object_id = o.id
-        where e.window_start = any(%s) order by e.occurred_at, e.id, o.id, eo.qualifier""",
-        (starts,),
+        where e.window_start = any(%s) and e.ingested_at <= %s
+        order by e.occurred_at, e.id, o.id, eo.qualifier""",
+        (starts, as_of),
     ).fetchall()
     if not relations:
         return

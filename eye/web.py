@@ -28,7 +28,7 @@ class MetricRegistration(BaseModel):
     direction: str = "both"
 
 
-def make_app(dsn, model=None, demo=None):
+def make_app(dsn, model=None):
     mcp = make_mcp(dsn)
     mcp_app = mcp.streamable_http_app()
 
@@ -38,8 +38,7 @@ def make_app(dsn, model=None, demo=None):
         worker = Thread(target=runtime.watch, args=(dsn, stop, model), daemon=True)
         worker.start()
         Thread(target=investigation.watch_reports, args=(dsn, stop, model), daemon=True).start()
-        if demo:
-            Thread(target=demo, args=(stop,), daemon=True).start()
+        Thread(target=investigation.watch_branches, args=(dsn, stop), daemon=True).start()
         try:
             async with mcp.session_manager.run():
                 yield
@@ -73,7 +72,7 @@ def make_app(dsn, model=None, demo=None):
                            select 1 from pending_reports p where p.incident_id = i.id
                        ) as investigation_pending
                        from incidents i order by (i.id = %s) desc nulls last,
-                           recovered_at nulls first, opened_at desc limit 50""",
+                           (recovered_at is null) desc, opened_at desc, id desc limit 50""",
                     (incident,),
                 ).fetchall(),
             }
@@ -85,17 +84,28 @@ def make_app(dsn, model=None, demo=None):
             if not window:
                 return []
             return db.execute(
-                """select id, activity, occurred_at, ingested_at, attrs from events
-                   where window_start <= %s order by occurred_at desc, id desc limit 40""",
+                """select e.id, e.activity, e.occurred_at, e.ingested_at, e.attrs
+                   from events e join windows w on w.start_at = %s
+                   where e.window_start <= w.start_at
+                     and e.ingested_at <= coalesce(w.observation_snapshot, w.end_at + interval '15 minutes')
+                   order by e.occurred_at desc, e.id desc limit 40""",
                 (window,),
             ).fetchall()
 
     @app.get("/api/incidents/{incident_id}/evidence")
-    def evidence(incident_id: int):
+    def evidence(incident_id: int, alerts_only: bool = False):
         with connect(dsn) as db:
+            if alerts_only:
+                return db.execute(
+                    """select kind, payload from evidence where incident_id = %s
+                       and kind in ('anomaly', 'related anomaly', 'ongoing anomaly')
+                       and payload ? 'id' order by window_start desc, id desc""",
+                    (incident_id,),
+                ).fetchall()
             return db.execute(
                 """select * from evidence where incident_id = %s
-                   order by window_start desc, id desc limit 120""",
+                   order by (kind in ('branch evidence', 'first observable break', 'observed events', 'anomaly')) desc,
+                            window_start desc, id desc limit 120""",
                 (incident_id,),
             ).fetchall()
 
