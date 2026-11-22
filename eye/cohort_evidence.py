@@ -1,7 +1,9 @@
 """Compare linked, contemporaneous traffic at a measured upstream change."""
 
 from collections import defaultdict
+from datetime import timedelta
 from math import sqrt
+from statistics import median
 
 from eye.intervals import GRACE, HOUR
 
@@ -9,6 +11,7 @@ PATH = ("product_viewed", "cart_add_requested", "cart_added", "checkout_started"
         "payment_attempted", "payment_succeeded", "order_confirmed")
 RATES = {
     "recommendation exposure": ("exposure", None),
+    "exposure before response": ("before_response", None),
     "cart entry": ("cart_add_requested", "product_viewed"),
     "cart completion": ("cart_added", "cart_add_requested"),
     "checkout entry": ("checkout_started", "cart_added"),
@@ -86,6 +89,7 @@ def matched_cohorts(rows, kind, start, end, scope):
             sessions[session].append(row)
     anchor = "cart_added" if kind == "stock" else "search_requested"
     cohorts, samples, signals, segments = [], [], [], set()
+    releases = defaultdict(lambda: [[], []])
     for events in sessions.values():
         entry = next((row for row in events if row["activity"] == anchor and start <= row["occurred_at"] < end), None)
         if not entry:
@@ -113,12 +117,17 @@ def matched_cohorts(rows, kind, start, end, scope):
             exposed = arm == "rollout"
             changed = exposed
             stratum = (attrs.get("country"), attrs.get("platform"), int(at.timestamp()) // 600)
+            releases[stratum][exposed].append((attrs.get("search_release"), attrs["response_ms"]))
         following = [row for row in events if at <= row["occurred_at"] <= at + GRACE]
         flags = {row["activity"] for row in following if row["activity"] in PATH}
         proposals = {row["id"]: row for row in following if row["activity"] == "feed_impression"}
         order = next((row for row in following if row["activity"] == "order_confirmed"), None)
         if any(order is None or row["occurred_at"] < order["occurred_at"] for row in proposals.values()):
             flags.add("exposure")
+            if kind == "search" and any(row["occurred_at"] < at + timedelta(milliseconds=attrs["response_ms"])
+                                        and (order is None or row["occurred_at"] < order["occurred_at"])
+                                        for row in proposals.values()):
+                flags.add("before_response")
         if order:
             order_attrs = order["attrs"]
             impression = proposals.get(order_attrs.get("recommendation_impression_id"))
@@ -133,8 +142,14 @@ def matched_cohorts(rows, kind, start, end, scope):
             segments.add(tuple((dim, attrs[dim]) for dim in dimensions if attrs.get(dim) is not None))
             if len(samples) < 3:
                 samples.append({"upstream": upstream, "eligible": entry, "downstream": sorted(flags)})
-    return {"rates": compare(cohorts), "preceded": len(signals), "first_change": min(signals, default=None),
-            "segments": [dict(segment) for segment in sorted(segments)], "samples": samples}
+    result = {"rates": compare(cohorts), "preceded": len(signals), "first_change": min(signals, default=None),
+              "segments": [dict(segment) for segment in sorted(segments)], "samples": samples}
+    if kind == "search":
+        for index, arm in enumerate(("holdout", "rollout")):
+            rows = [row for pair in releases.values() if all(pair) for row in pair[index]]
+            result[arm] = {"releases": sorted({release for release, _ in rows if release}),
+                           "median_ms": median([delay for _, delay in rows]) if rows else None}
+    return result
 
 
 def read_cohorts(db, kind, start, end, cutoff, scope, facts=None):
@@ -160,4 +175,8 @@ def read_cohorts(db, kind, start, end, cutoff, scope, facts=None):
 def supports_link(kind, evidence):
     rates = evidence["rates"]
     targets = ("cart entry", "recommendation exposure") if kind == "search" else ("checkout entry",)
+    if kind == "search":
+        exposed, control = evidence["rollout"]["median_ms"], evidence["holdout"]["median_ms"]
+        if exposed is None or control is None or exposed >= .8 * control:
+            return False
     return evidence["preceded"] > 0 and all(rates[target]["status"] == "lower" for target in targets)

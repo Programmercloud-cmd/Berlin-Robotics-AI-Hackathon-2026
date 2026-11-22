@@ -487,7 +487,7 @@ def matched_branch(db, incident, start, cutoff, kind):
     supported, weakened, unresolved = [], [], []
     if evidence["first_change"]:
         at = evidence["first_change"].strftime("%H:%M:%S UTC")
-        prefix = "A SKU changed from positive stock to zero before carts reached checkout" if kind == "stock" else \
+        prefix = "A SKU changed from positive stock to zero before it was added to matching carts" if kind == "stock" else \
             "Search rollout requests preceded recommendation exposure and ordering opportunities"
         supported.append(f"{prefix}. The earliest linked upstream reading was at {at}.")
     targets = ("checkout entry",) if kind == "stock" else ("recommendation exposure", "cart entry", "orders per shopper")
@@ -501,6 +501,16 @@ def matched_branch(db, incident, start, cutoff, kind):
         destination = supported if rate["status"] == "lower" else unresolved if rate["status"] == "inconclusive" else weakened
         destination.append(caption)
     if kind == "search":
+        rollout, holdout = evidence["rollout"], evidence["holdout"]
+        if rollout["median_ms"] is not None and holdout["median_ms"] is not None:
+            caption = (f"Matched rollout ({', '.join(rollout['releases']) or 'unrecorded release'}) had median response "
+                       f"{rollout['median_ms']:.0f} ms versus {holdout['median_ms']:.0f} ms in the holdout "
+                       f"({', '.join(holdout['releases']) or 'unrecorded release'}).")
+            (supported if rollout["median_ms"] < holdout["median_ms"] else weakened).append(caption)
+        before = evidence["rates"]["exposure before response"]
+        if before["status"] == "lower":
+            supported.append(f"Recommendation exposure before the response fell from {before['control']:.1%} in "
+                             f"holdout to {before['exposed']:.1%} in rollout.")
         direct = evidence["rates"]["direct orders per shopper"]
         assisted = evidence["rates"]["assisted orders per shopper"]
         if direct["gap"] is not None and assisted["gap"] is not None:
