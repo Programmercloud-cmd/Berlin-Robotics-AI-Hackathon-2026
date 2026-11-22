@@ -27,12 +27,18 @@ from eye.model import configured_devin, configured_model
 
 log = logging.getLogger(__name__)
 START = simulator.DEMO_START
+REVIEW_RUBRIC_VERSION = 2
 REVIEW_PROMPT = """Score Eye's incident reports for a seeded Test Lab benchmark. Use each case rubric as an
-expectation, never as evidence that Eye observed. Judge each supplied ID and phase separately. For
-observable_break, scope and evidence use supported, partial, unsupported or insufficient. Reward
-well-calibrated uncertainty when a cause or scope is unavailable. List only actual unsupported
-claims made in the report. Cite concrete observations in short notes. Return exactly one verdict
-for every supplied report ID. For deeper findings, assess the explanations and evidence in that phase."""
+expectation, never as evidence that Eye observed. Return exactly one verdict per supplied report ID.
+Use supported, partial, unsupported or insufficient for observable_break, scope and evidence.
+Assess an initial report using only its own captured telemetry. For deeper findings, use the report
+and telemetry referenced by initial_report_id as context for that same incident. Carry forward a
+break or scope established by evidence unless the deeper findings revise or contradict it. The
+deeper findings need not restate those facts. Assess the evidence for what the deeper findings add,
+confirm, rule out or revise, and describe that contribution in the notes. If there is no linked
+initial report, use only the deeper findings and their telemetry. Reward well-calibrated uncertainty
+when the mechanism or scope remains unknown. Cite concrete observations and list only unsupported
+claims made in the phase being scored."""
 Verdict = Literal["supported", "partial", "unsupported", "insufficient"]
 
 
@@ -114,26 +120,39 @@ def case_result(dsn, identifier, name, benign):
     }
 
 
-def review_item(case, snapshot):
+def review_item(case, snapshot, has_initial=False):
     evidence = snapshot["telemetry"]
     if snapshot["phase"] == "initial":
+        shared = evidence.get("shared_explanation")
         evidence = {"anomaly": evidence["anomaly"], "transition": evidence.get("transition"),
                     "readings": [{key: row[key] for key in ("metric_id", "scope", "observed", "expected", "sample_size")}
                                  for row in evidence["metric_evidence"]],
                     "segments": evidence["segment_comparison"], "window": evidence["context"],
                     "events": [event for sample in evidence["event_evidence"] for event in sample["events"][:1]]}
+        if shared:
+            evidence["shared_explanation"] = shared
     else:
         evidence = [item for index, item in enumerate(evidence) if item not in evidence[:index]]
-    return {"id": f"{case['id']}/{snapshot['incident_id']}/{snapshot['phase']}",
+    prefix = f"{case['id']}/{snapshot['incident_id']}"
+    phase = snapshot["phase"]
+    item = {"id": f"{prefix}/{phase}", "phase": phase,
             "report": snapshot["report"], "telemetry": evidence,
             "observed_through": snapshot["observed_through"]}
+    if phase == "deeper" and has_initial:
+        item["initial_report_id"] = f"{prefix}/initial"
+    return item
 
 
 def score(run):
     rubrics = {case[0]: case[-1] for case in CASES}
-    cases = [{"id": case["id"], "rubric": rubrics[case["id"]],
-              "reports": [review_item(case, report) for report in case.get("reports", ())]}
-             for case in run["cases"] if case.get("reports")]
+    cases = []
+    for case in run["cases"]:
+        reports = case.get("reports", ())
+        if reports:
+            initial = {report["incident_id"] for report in reports if report["phase"] == "initial"}
+            cases.append({"id": case["id"], "rubric": rubrics[case["id"]],
+                          "reports": [review_item(case, report, report["incident_id"] in initial)
+                                      for report in reports]})
     expected = {report["id"] for case in cases for report in case["reports"]}
     if not expected:
         raise RuntimeError("The suite produced no reports for Devin to review.")
@@ -143,7 +162,7 @@ def score(run):
         raise RuntimeError("Devin did not return exactly one verdict for each report.")
     for case in run["cases"]:
         case["reviews"] = [review for review in reviews if review["id"].split("/", 1)[0] == case["id"]]
-    run["review"] = provenance
+    run["review"] = {**provenance, "rubric_version": REVIEW_RUBRIC_VERSION}
 
 
 def replay(path, run):
