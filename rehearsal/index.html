@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#121110">
+  <title>Eye of the System · Devin investigation replay</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" type="module"></script>
+</head>
+<body>
+  <header class="bar">
+    <div class="shell header-row">
+      <a class="brand" href="#landing"><span class="eye-mark" aria-hidden="true"></span>Eye of the System</a>
+      <span id="current-chapter" class="current-chapter">Devin-led investigation</span>
+    </div>
+    <div class="reading-progress" aria-hidden="true"></div>
+  </header>
+  <main>
+    <section class="shell hero" id="landing" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="signal-dot" aria-hidden="true"></span> Devin-led investigation</p>
+        <h1 id="hero-title" tabindex="-1">Payment <span>timeout.</span></h1>
+        <p class="context" id="replay-status" role="status">Loading replay…</p>
+        <a class="begin" href="#telemetry" id="begin" hidden>Start walkthrough <span aria-hidden="true">↓</span></a>
+        <p class="keyboard-guide" id="keyboard-guide" hidden><kbd>Space</kbd> or <kbd>↓</kbd> next chapter · Scroll for detail</p>
+      </div>
+      <div class="signal-art" aria-hidden="true">
+        <div class="signal-grid"></div>
+        <div class="orbital">
+          <i class="orbit orbit-outer"></i><i class="orbit orbit-mid"></i><i class="orbit orbit-inner"></i>
+          <i class="orbit-sweep"></i><i class="orbital-eye"></i>
+          <i class="orbit-point point-a"></i><i class="orbit-point point-b"></i><i class="orbit-point point-c"></i>
+        </div>
+      </div>
+    </section>
+    <div id="story"></div>
+  </main>
+</body>
+</html>
