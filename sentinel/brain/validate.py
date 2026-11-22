@@ -88,6 +88,13 @@ def check_breakdown(g: BrainGraph, data, metric: str, dim: str, start: datetime,
     sl = data.metric(metric, start, end, group_by=[dim])
     members = sorted(sl[dim].astype(str).unique().tolist())
     s = sl.groupby("ts")[["value", "numerator", "denominator"]].sum()
+    gauge_without_parts = kind == "gauge" and bool((sl.denominator.dropna() == 1).all())
+    if gauge_without_parts and g.nodes[metric].unit in ("seconds", "ms", "score"):
+        # percentiles / scores: slices are compared with each other, they never add up to the total
+        return "validated", f"{len(members)} slices; non-additive ({g.nodes[metric].unit}): compared, not summed", \
+            {"members": members, "n_members": len(members), "additive": False}
+    if kind in ("count", "sum") or gauge_without_parts:   # snapshot levels (stock units) add up across slices
+        kind = "count"
     if kind in ("count", "sum"):
         errs = [(tot.value - s.value).abs() / tot.value.abs().clip(lower=1e-9)]
     else:
@@ -208,7 +215,7 @@ def validate_graph(g: BrainGraph, data, as_of: datetime, formula_days: int = 7, 
         if not es:
             continue
         n = g.nodes[output]
-        if not (n.value_sql or n.numerator_sql):
+        if not (n.value_sql or n.numerator_sql or n.table):   # computed from its formula by the data layer
             for e in es:
                 g.set_status(e, "seed" if e.status == "seed" else "validated",
                              "computed from this formula by construction; not independently testable")

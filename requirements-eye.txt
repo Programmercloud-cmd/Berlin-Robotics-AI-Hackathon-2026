@@ -1,0 +1,12 @@
+# Sentinel on Eye of the System (branch jacob/v1), Python 3.11 compatible
+-r requirements.txt
+pm4py
+psycopg[binary]
+pgserver
+mcp<2
+networkx
+scipy
+fastapi
+httpx
+uvicorn
+python-dotenv

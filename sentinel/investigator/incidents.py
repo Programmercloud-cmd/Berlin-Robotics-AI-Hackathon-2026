@@ -186,8 +186,10 @@ class IncidentManager:
             self.bus.publish("INCIDENT_UPDATED", "incidents", {"id": inc.id, "state": "merged", "merged_into": keep.id,
                                                                "why": f"same fingerprint {inc.fingerprint}"}, inc.id)
             return
-        impact = abs(self.cases[inc.id].notes.get("impact", {}).get("contribution_eur_per_h", 0.0))
-        if inc.label in ("supported_cause", "hypothesis", "unexplained") and impact >= ALERT_MIN_EUR_PER_H:
+        signed = self.cases[inc.id].notes.get("impact", {}).get("contribution_eur_per_h", 0.0)
+        impact = abs(signed)
+        # alert on business harm only: a favourable change (e.g. a traffic jump) is recorded, not paged
+        if inc.label in ("supported_cause", "hypothesis", "unexplained") and signed <= -ALERT_MIN_EUR_PER_H:
             inc.state = "alerted"
             self.alerted.add(inc.id)
             self.bus.publish("FINAL_REPORT", "investigator", {"id": inc.id, "kind": "alert", "label": inc.label,
@@ -197,6 +199,7 @@ class IncidentManager:
             inc.state = "monitoring"
             why = {"explained": "explained by a planned change: no alert",
                    "data_issue": "data issue: held until the data is complete"}.get(inc.label,
+                   f"favourable change (+{impact:,.0f} EUR/h): recorded, no alert" if signed > 0 else
                    f"impact {impact:,.0f} EUR/h below the alert threshold")
             self.bus.publish("INCIDENT_UPDATED", "incidents", {"id": inc.id, "state": "monitoring", "label": inc.label,
                                                                "why": why, "report_md": inc.report_md}, inc.id)

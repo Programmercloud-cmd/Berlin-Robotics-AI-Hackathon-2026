@@ -129,8 +129,9 @@ class MonitorEngine:
     # ================================================================ attention
     def watch_plan(self, ts) -> list[tuple[str, list[str], list[str]]]:
         plan: dict[tuple[str, tuple], list[str]] = defaultdict(list)
+        keys = self.g.profile.get("key_metrics", KEY_METRICS)
         for i, m in enumerate(self.g.nodes):
-            plan[(m, ())].append("impact" if m in KEY_METRICS else "coverage")
+            plan[(m, ())].append("impact" if m in keys else "coverage")
             dims = self.g.nodes[m].dimensions
             if dims:
                 plan[(m, (dims[(self.tick_no + i) % len(dims)],))].append("rotation")
@@ -139,7 +140,7 @@ class MonitorEngine:
                 continue
             for m, node in self.g.nodes.items():
                 linked = ev.service and ev.service in self.g.services(m)
-                if linked or m in KEY_METRICS:
+                if linked or m in keys:
                     for d in ev.scope:
                         if d in node.dimensions:
                             plan[(m, (d,))].append(f"recent {ev.type}: {ev.description}")
@@ -258,7 +259,7 @@ class MonitorEngine:
             w_seg = part.expected(ts)[1] if self.g.nodes[metric].kind in ("ratio", "gauge") else part.expected(ts)[0]
             w_tot = tot.expected(ts)[1] if self.g.nodes[metric].kind in ("ratio", "gauge") else tot.expected(ts)[0]
             share = float(np.clip(w_seg / max(w_tot, 1e-9), 0, 1))
-        return float(self.propagate(metric, rel * share, ts).get("contribution_eur", 0.0))
+        return float(self.propagate(metric, rel * share, ts).get("money_eur", 0.0))
 
     def propagate(self, metric: str, rel: float, ts) -> dict:
         """Numerically push a relative change of `metric` up every formula to contribution, using expected
@@ -278,6 +279,8 @@ class MonitorEngine:
                     changes[out] = f.evaluate(shocked) / b0 - 1
                     frontier.append(out)
         res = {"relative_changes": changes}
-        if "contribution" in changes:
-            res["contribution_eur"] = changes["contribution"] * self.baseline("contribution", {}).expected(ts)[0]
+        money = self.g.profile.get("money_metric", "contribution")
+        if money in changes and money in self.g.nodes:
+            res["money_eur"] = (changes[money] * self.baseline(money, {}).expected(ts)[0]
+                                * self.g.profile.get("money_scale", 1.0))
         return res

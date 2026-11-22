@@ -5,7 +5,9 @@ from typing import Literal, Optional
 import pandas as pd
 from pydantic import BaseModel
 
-Dim = Literal["country", "platform", "channel", "category", "advertiser"]
+# Dimension names come from the data source (e.g. country, platform, channel, payment_provider).
+Dim = str
+KNOWN_DIMS = ("country", "platform", "channel", "category", "advertiser")
 Segment = dict[str, str]  # {} = total
 Status = Literal["seed", "proposed", "validated", "needs_review", "rejected"]
 
@@ -46,7 +48,7 @@ class MetricNode(BaseModel):
     name: str
     description: str
     kind: Literal["count", "sum", "ratio", "gauge"]
-    unit: Literal["count", "eur", "share", "score"]
+    unit: str  # count | eur | share | score | ms | seconds | ...
     table: str
     value_sql: Optional[str] = None  # count/sum, e.g. "SUM(orders)"
     numerator_sql: Optional[str] = None  # ratio/gauge

@@ -25,9 +25,10 @@ def render_report(g, case, best, impact: dict) -> str:
     if best is not None:
         lines.append(f"**Leading explanation ({best.posterior:.0%}):** {best.statement}.")
     if impact.get("hours"):
+        lab = impact.get("money_label", "contribution")
         lines.append(f"**Business impact:** {impact['orders_delta']:+,.0f} orders, GMV {impact['gmv_delta_eur']:+,.0f} EUR, "
-                     f"contribution {impact['contribution_eur_total']:+,.0f} EUR over {impact['hours']} h "
-                     f"({impact['contribution_eur_per_h']:+,.0f} EUR/h; margin {impact['margin']:.1%} of GMV).")
+                     f"{lab} {impact['contribution_eur_total']:+,.0f} EUR over {impact['hours']} h "
+                     f"({impact['contribution_eur_per_h']:+,.0f} EUR/h; {lab} is {impact['margin']:.1%} of GMV).")
     lines += ["", "### Evidence"]
     for e in case.evidence:
         lines.append(f"- **{e.id}** [{e.step}] {e.interpretation}")
@@ -39,7 +40,18 @@ def render_report(g, case, best, impact: dict) -> str:
             for p in h.predictions:
                 lines.append(f"  - {p}")
     lines += ["", "### What remains uncertain"]
-    if inc.label == "supported_cause":
+    mech = case.hyp_meta.get(best.id, {}).get("mechanism") if best is not None else None
+    if mech:
+        samples = case.hyp_meta[best.id].get("samples") or []
+        if samples:
+            lines.insert(lines.index("### Evidence"), "**Observed events:** " + "; ".join(
+                f"`{s['id']}` {s['activity']} at {s['at'][11:16]}"
+                + (" (" + ", ".join(f"{k}={v}" for k, v in s["attrs"].items()) + ")" if s["attrs"] else "")
+                for s in samples) + chr(10))
+        lines.append(f"- The data shows the failure mechanism ({mech} in this segment). Why it happens, for example "
+                     "a provider incident or a release, is not visible in the observations: no release or "
+                     "configuration change was recorded.")
+    elif inc.label == "supported_cause":
         lines.append("- Attribution to the event rests on timing, scope and mechanism; it is not an experiment. "
                      "A rollback that restores the metric would strengthen it.")
     elif inc.label == "hypothesis":

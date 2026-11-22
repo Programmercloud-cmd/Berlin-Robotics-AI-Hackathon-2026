@@ -46,6 +46,11 @@ class BrainGraph:
         self.edges: dict[str, Edge] = {}
         self.notes: dict[str, dict] = {}            # edge key -> {"reason": str, "stats": dict}
         self.log: list[dict] = []
+        # profile: which metrics carry money and volume (catalog-specific ids)
+        self.profile: dict = {"money_metric": "contribution", "gmv_metric": "gmv", "orders_metric": "orders",
+                              "money_scale": 1.0, "money_label": "contribution",
+                              "key_metrics": ["contribution", "gmv", "orders", "conversion_rate",
+                                              "payment_success_rate", "sessions"]}
 
     # ================================================================ building
     @classmethod
@@ -163,6 +168,8 @@ class BrainGraph:
         n = self.nodes.get(metric)
         if n is None or metric in _seen:
             return []
+        if not (n.value_sql or n.numerator_sql) and n.table and metric not in self.formulas:
+            return [n.table]                       # source-backed node without SQL (external catalog)
         if not (n.value_sql or n.numerator_sql):  # formula-only node
             f = self.formulas.get(metric)
             return sorted({t for v in (Formula.parse(f).variables if f else []) for t in self.tables_of(v, _seen | {metric})})
@@ -206,7 +213,7 @@ class BrainGraph:
                          "action": action, "target": target, "detail": detail})
 
     def to_dict(self) -> dict:
-        return {"nodes": [n.model_dump(mode="json") for n in self.nodes.values()],
+        return {"profile": self.profile, "nodes": [n.model_dump(mode="json") for n in self.nodes.values()],
                 "formulas": self.formulas,
                 "edges": [dict(e.model_dump(mode="json"), key=k, **self.notes.get(k, {})) for k, e in self.edges.items()],
                 "log": self.log}
@@ -228,4 +235,5 @@ class BrainGraph:
             if note:
                 g.notes[k] = note
         g.log = d["log"]
+        g.profile.update(d.get("profile", {}))
         return g

@@ -32,7 +32,7 @@ from typing import get_args
 from sentinel.contracts import Dim, Edge, MetricNode, seg_key
 
 
-ALLOWED_DIMS = set(get_args(Dim))
+ALLOWED_DIMS = set(get_args(Dim))   # empty when Dim is an open vocabulary: any data dimension is allowed
 
 
 def _cols(sql: str | None) -> set[str]:
@@ -51,7 +51,7 @@ class MetaAgent:
             f"Dead end on {focus} [{seg_key(seg) or 'total'}]: {'; '.join(reasons)}. Reading the data dictionary "
             f"({len(schema)} tables) for unused dimensions and columns."}, incident_id)
         wanted = sorted({d for r in reasons for d in re.findall(r"'([a-z_]+)'", r.split("no dimension")[-1])
-                         if "no dimension" in r and d in ALLOWED_DIMS})
+                         if "no dimension" in r and (not ALLOWED_DIMS or d in ALLOWED_DIMS)})
         applied = []
         applied += self._cross_dimensions(focus, schema, start, end, incident_id, wanted)
         applied += self._derived_metrics(focus, seg, schema, start, end, incident_id)
@@ -72,7 +72,7 @@ class MetaAgent:
         table = fnode.table
         if True:
             for dim in schema.get(table, {}).get("dimensions", []):
-                if dim not in ALLOWED_DIMS or (wanted and dim not in wanted):
+                if (ALLOWED_DIMS and dim not in ALLOWED_DIMS) or (wanted and dim not in wanted):
                     continue
                 nodes = [n for n in self.g.nodes.values() if n.id in family and dim not in n.dimensions
                          and set(self.g.tables_of(n.id)) == {table}]
@@ -201,6 +201,92 @@ class MetaAgent:
                 s.nodes = {**g.nodes, n.id: n}
         return _View(self.g, node)
 
+    # ================================================================ process mining: unmeasured activities
+    FAILURE_WORDS = ("failed", "timed_out", "declined", "error", "rejected")
+
+    def mine_unmeasured_activities(self, engine, store, as_of, history_start) -> list[dict]:
+        """Step 4: activities in the discovered process (PM4Py OC-DFG) that no metric measures become new
+        metrics. A failure activity is divided by the step it follows (failure rate); a request activity
+        is completed by the step that follows it (completion rate). Each candidate is computed in a sandbox
+        on history before it is registered in the agent-only table sentinel.metrics."""
+        if not hasattr(self.data, "process_activities"):
+            return []
+        from sentinel.adapters.eye import node_from_catalog
+        acts = self.data.process_activities()
+        by = {a["activity"]: a for a in acts}
+        todo = [a for a in acts if not a["measured"] and a["events"] > 0]
+        self.bus.publish("META_PROPOSAL", "meta", {"stage": "process_mining", "text":
+            f"PM4Py OC-DFG has {len(acts)} activities; {len(todo)} are not measured by any metric: "
+            f"{', '.join(a['activity'] for a in todo) or 'none'}"})
+        hist = engine.windows(history_start, as_of)
+        dims_all = sorted({d for n in self.g.nodes.values() for d in n.dimensions})
+        made = []
+        for a in todo:
+            act = a["activity"]
+            if any(w in act for w in self.FAILURE_WORDS) and a["predecessor"]:
+                num, den, kind = act, a["predecessor"], "failure"
+                mid, direction = f"{act}_rate", "up"
+                desc = f"Share of {den} events followed by {act} (failure rate mined from the process map)"
+            elif (succ := next((x for x in a.get("successors", [a["successor"]])
+                                if x and not any(w in x for w in self.FAILURE_WORDS)), None))                     and by.get(succ, {}).get("events", 0) <= a["events"] * 1.05:
+                num, den, kind = succ, act, "completion"   # success path only; failures get their own rate
+                mid, direction = f"{act.replace('_requested', '')}_completion_rate", "down"
+                desc = f"Share of {act} events completed by {num} (completion rate mined from the process map)"
+            else:
+                continue
+            if mid in self.g.nodes:
+                continue
+            dims = self.data.activity_dimensions(act, ["country", "platform", "acquisition_channel"])
+            spec = {"id": mid, "name": mid.replace("_", " ").capitalize(), "definition": desc,
+                    "calculation": {"op": "event_ratio", "activity": num, "denominator_activity": den, "pattern": kind},
+                    "dimensions": dims, "access": {"unit": "ratio", "source": "events"}, "direction": direction,
+                    "provenance": "meta.process_mining", "kind": "ratio"}
+            rows = engine.compute(spec, hist)                       # sandbox: computed, not stored
+            vals = [r[3] for r in rows if not r[2] and r[3] is not None]
+            if len(vals) < max(3, len(hist) // 2) or not all(0 <= v <= 1.0 + 1e-9 for v in vals):
+                self.bus.publish("META_RESULT", "meta", {"text": f"{mid} rejected in sandbox: "
+                                 f"{len(vals)} hourly values, range check {'ok' if vals else 'empty'}"})
+                continue
+            spec["status"] = "validated"
+            store.register_metric(spec)
+            self.data.add_agent_metric(spec)
+            engine.backfill(spec)
+            node = node_from_catalog(spec)
+            node.owner, node.status = "meta-agent", "validated"
+            self.g.add_node(node, actor="meta-agent")
+            for e in self.g.edges_where("breakdown", src=mid, usable=False):
+                self.g.set_status(e, "validated", "dimensions of the mined events", actor="meta-agent")
+            self.mon.fit([mid])
+            m = {"kind": "mined_metric", "metric": mid, "pattern": kind,
+                 "summary": f"mined {mid} = {num} / {den} from the process map "
+                            f"(baseline {sum(vals) / len(vals):.2%}, {len(vals)} hours)"}
+            self.bus.publish("GRAPH_MUTATION", "meta", m)
+            made.append(m)
+            # where does it act on the funnel? the step rate whose numerator measures the activity that
+            # follows the request in the process map
+            if kind == "failure":   # the success path after the request (skip the failure itself)
+                target_act = next((x for x in by.get(den, {}).get("successors", [])
+                                   if x != num and not any(w in x for w in self.FAILURE_WORDS)), None)
+            else:
+                target_act = num
+            step = next((v for v, (n_id, _) in getattr(self.data, "virtual", {}).items()
+                         if target_act and self.data.catalog.get(n_id, {}).get("calculation", {}).get("activity") == target_act),
+                        None)
+            if step:
+                sign = "-" if kind == "failure" else "+"
+                edge = Edge(type="causal", src=mid, dst=step, sign=sign, lag_h=(0, 1), prior=0.4,
+                            confidence=0.4, status="proposed")
+                self.g.add_edge(edge, actor="meta-agent")
+                from sentinel.brain.validate import check_causal
+                verdict, reason, st, conf = check_causal(self.g, self.data, edge, pd.Timestamp(history_start),
+                                                         pd.Timestamp(as_of))
+                status = {"supported": "validated", "contradicted": "needs_review"}.get(verdict, "proposed")
+                self.g.set_status(edge, status, f"process map: {den} -> {target_act}; {reason}", st,
+                                  confidence=conf, actor="meta-agent")
+                self.bus.publish("GRAPH_MUTATION", "meta", {"kind": "causal", "edge": f"{mid} -({sign})-> {step}",
+                                 "summary": f"proposed {mid} -({sign})-> {step} from the process map: {verdict}"})
+        return made
+
     # ================================================================ contributor registration
     def register(self, spec: dict, as_of) -> dict:
         """A contributor submits {id, name, description, table, numerator_sql/denominator_sql | value_sql}.
@@ -216,7 +302,8 @@ class MetaAgent:
         dims = self.data.schema()[table]["dimensions"]
         node = MetricNode(id=sid, name=spec.get("name", sid), description=spec.get("description", ""), kind=kind,
                           unit=unit, table=table, value_sql=spec.get("value_sql"), numerator_sql=spec.get("numerator_sql"),
-                          denominator_sql=spec.get("denominator_sql"), dimensions=[d for d in dims if d in ALLOWED_DIMS],
+                          denominator_sql=spec.get("denominator_sql"),
+                          dimensions=[d for d in dims if (not ALLOWED_DIMS or d in ALLOWED_DIMS) and d != "sku"],
                           owner=spec.get("owner", "contributor"), status="proposed")
         self.data.register_node(node)
         warnings, edges = [], []

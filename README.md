@@ -67,3 +67,33 @@ Knowledge: sentinel/brain/   metric graph (formula / breakdown / causal / contex
 The data layer here is a simulated marketplace (`dev/fake_data.py`) with realistic tables, baseline and
 scenarios. The agent only uses `metric()`, `completeness()`, `events()` and `schema()`, so a real
 warehouse can replace the stand-in without changing the agent.
+
+## Running on Eye of the System (jacob/v1)
+
+`sentinel/adapters/` runs the same agent on Eye's PostgreSQL + OCEL data:
+
+- `eye.py` implements the agent's data interface (`metric`, `completeness`, `events`, `schema`) on top of
+  `eye.observations`. Slices that Eye has not pre-computed are re-aggregated from finer scopes, and
+  event-level queries supply evidence.
+- `eye_formulas.py` derives formula edges from PM4Py and the catalog:
+  - the process tree's exclusive choice gives `payment_success_rate = 1 - shares of the other outcomes`;
+  - the session lifecycle gives funnel step rates;
+  - payment → order gives `orders = successful_payments`.
+  Every formula is validated on data.
+- `eye_process.py` adds the agent's own metrics:
+  - PM4Py conformance (token-replay fitness against an inductively mined Petri net);
+  - performance (payment outcome time);
+  - metrics the meta-agent mines from activities no metric measures yet.
+- `eye_store.py` keeps the agent's results in its own schema `sentinel` (`metrics`, `observations`,
+  `incidents`, `evidence`, `bus_events`). These tables reuse Eye's table layouts plus the agent's
+  columns. The agent never writes to `eye.*`, and Eye's simulator and graph never read `sentinel.*`.
+
+```
+git worktree add .eye-jacob <remote>/jacob/v1          # Eye checkout next to this repo
+python -m venv .venv-eye && .venv-eye/Scripts/python -m pip install -r requirements-eye.txt
+.venv-eye/Scripts/python -m pytest -q tests/test_eye_adapter.py   # one simulated day, ~90 s
+.venv-eye/Scripts/python -m sentinel.run_eye                       # full rehearsal timeline
+```
+
+On Windows, pgserver ships without a timezone database. Eye's `db.connect` needs
+`set time zone interval '+00:00' hour to minute` instead of `'UTC'`.

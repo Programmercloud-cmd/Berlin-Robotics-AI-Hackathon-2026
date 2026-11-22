@@ -180,6 +180,10 @@ class Investigator:
         # ---- 5. hypotheses from events, 6. from causal edges, 7. predictions
         self.hypothesise(case, onset, now)
 
+        # ---- 7b. observed failure mechanism from event-level data (OCEL sources only)
+        if hasattr(self.data, "activity_mix"):
+            self.mechanism(case, onset, now)
+
         # ---- 8. dead end -> meta-agent
         best = max((h.posterior for h in case.hyps if h.status != "rejected"), default=0.0)
         if self.meta is not None and (best < 0.8 or case.dead_end_reasons):
@@ -322,6 +326,56 @@ class Investigator:
                     self.judge(case, h, f"mechanism chain {e.service} -> {c} -> {case.focus}", True,
                                f"{c} belongs to {e.service} and moved with the expected sign at the onset")
 
+    def mechanism(self, case: Case, start, end):
+        """Which concrete events changed inside the segment? (e.g. payment_timed_out share 2% -> 63%).
+        This is the observed failure mechanism, not yet its underlying cause."""
+        acts = self.data.activities_for(case.focus)
+        if len(acts) < 2:
+            return
+        denominators = {"payment_attempted", "session_started", "search_requested", "feed_impression"}
+        outcomes = [a for a in acts if a not in denominators] or acts
+        mix = self.step(case, "predict", f"Which events behind {case.focus} changed inside {fmt_seg(case.seg)}?",
+                        f"activity_mix({outcomes}, {fmt_seg(case.seg)}, now vs same hours on 7 previous days)",
+                        lambda: self.data.activity_mix(start, end, case.seg, outcomes),
+                        lambda r: ("; ".join(f"{x['activity']} {x['now']} vs {x['baseline']:.0f} usual" for x in r),
+                                   {x["activity"]: x["now"] for x in r}))
+        tn, tb = sum(x["now"] for x in mix), sum(x["baseline"] for x in mix)
+        if tn < 20 or tb <= 0:
+            return
+        shifts = [(x["now"] / tn - x["baseline"] / tb, x) for x in mix]
+        # the mechanism is what appears MORE (timeouts, failures); a success share falling by the same amount
+        # is its mirror image. Fall back to the largest drop only when nothing rose.
+        rising = [sh for sh in shifts if sh[0] >= 0.05]
+        delta, top = max(rising, key=lambda s: s[0]) if rising else max(shifts, key=lambda s: abs(s[0]))
+        share_now, share_base = top["now"] / tn, top["baseline"] / tb
+        if abs(delta) < 0.05:
+            return
+        samples = self.data.supporting_events(start, end, case.seg, top["activity"], limit=3)
+        attrs = samples[0]["attrs"] if samples else {}
+        detail = ", ".join(f"{k}={v}" for k, v in attrs.items() if k in ("response", "http_status", "result_count"))
+        self.step(case, "predict", f"Show concrete {top['activity']} events from the affected segment.",
+                  f"supporting_events({top['activity']}, {fmt_seg(case.seg)}, limit=3)",
+                  lambda: samples,
+                  lambda r: ((f"events {', '.join(s['id'] for s in r)}" + (f" ({detail})" if detail else ""))
+                             if r else "no sample events", {"samples": len(r)}))
+        verb = "rose" if delta > 0 else "fell"
+        h = self.add_hyp(case, f"observed failure mechanism: {top['activity']} {verb} from {share_base:.1%} to "
+                               f"{share_now:.1%} of {case.focus} outcomes in {fmt_seg(case.seg)}"
+                               + (f" ({detail})" if detail else ""), "event", 0.4,
+                         {"mechanism": top["activity"], "samples": samples})
+        self.judge(case, h, f"{top['activity']} share changed inside the segment", True,
+                   f"{share_base:.1%} -> {share_now:.1%} ({top['now']} events)")
+        # outside the segment the mix must be normal, else it is not specific to this segment
+        if case.seg:
+            allm = self.data.activity_mix(start, end, {}, outcomes)
+            on = sum(x["now"] for x in allm) - tn
+            ob = sum(x["baseline"] for x in allm) - tb
+            a_all = next(x for x in allm if x["activity"] == top["activity"])
+            if on > 20 and ob > 0:
+                out_now, out_base = (a_all["now"] - top["now"]) / on, (a_all["baseline"] - top["baseline"]) / ob
+                self.judge(case, h, f"{top['activity']} share normal outside {fmt_seg(case.seg)}",
+                           abs(out_now - out_base) < abs(delta) / 3, f"{out_base:.1%} -> {out_now:.1%} elsewhere")
+
     # ================================================================ conclusion
     def conclude(self, case: Case, label: str | None = None) -> Case:
         inc = case.inc
@@ -355,14 +409,22 @@ class Investigator:
     def impact(self, case: Case) -> dict:
         """Euro impact on contribution: GMV deviation in the segment x contribution margin."""
         out = {"hours": 0}
-        seg = {k: v for k, v in case.seg.items() if k in self.g.nodes["gmv"].dimensions}
-        w = self.tools.window_dev("gmv", seg, case.start, case.end)
-        o = self.tools.window_dev("orders", seg, case.start, case.end)
+        prof = self.g.profile
+        gmv_id, orders_id, money_id = prof["gmv_metric"], prof["orders_metric"], prof["money_metric"]
+        scale = prof.get("money_scale", 1.0)
+        if gmv_id not in self.g.nodes or orders_id not in self.g.nodes:
+            return out
+        seg = {k: v for k, v in case.seg.items() if k in self.g.nodes[gmv_id].dimensions}
+        w = self.tools.window_dev(gmv_id, seg, case.start, case.end)
+        oseg = {k: v for k, v in case.seg.items() if k in self.g.nodes[orders_id].dimensions}
+        o = self.tools.window_dev(orders_id, oseg, case.start, case.end)
         hours = max(w.get("hours", 0), 1)
         ts_mid = case.start + (case.end - case.start) / 2
-        margin = self.mon.baseline("contribution", {}).expected(ts_mid)[0] / max(self.mon.baseline("gmv", {}).expected(ts_mid)[0], 1e-9)
-        d_gmv = (w["actual"] - w["expected"]) if np.isfinite(w.get("actual", np.nan)) else 0.0
-        out.update({"hours": hours, "gmv_delta_eur": d_gmv, "orders_delta": o["actual"] - o["expected"],
+        money_base = self.mon.baseline(money_id, {}).expected(ts_mid)[0] if money_id in self.g.nodes else 0.0
+        margin = money_base / max(self.mon.baseline(gmv_id, {}).expected(ts_mid)[0], 1e-9)
+        d_gmv = ((w["actual"] - w["expected"]) * scale) if np.isfinite(w.get("actual", np.nan)) else 0.0
+        out.update({"hours": hours, "gmv_delta_eur": d_gmv, "money_label": prof.get("money_label", "contribution"),
+                    "orders_delta": (o["actual"] - o["expected"]) if np.isfinite(o.get("actual", np.nan)) else 0.0,
                     "margin": margin, "contribution_eur_total": d_gmv * margin,
                     "contribution_eur_per_h": d_gmv * margin / hours})
         return out
