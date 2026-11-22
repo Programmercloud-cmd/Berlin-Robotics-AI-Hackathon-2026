@@ -101,7 +101,7 @@ const steps = [
     id: "registration",
     title: "Live metric registration",
     summary: "Registering Payment timeout rate adds a calculation, readings, and graph links using payment telemetry already flowing through Eye.",
-    guidance: "Open Table → Payment timeout rate. Use Register if it is awaiting registration, or View metric → Connections when available. Scoped replay readings opens the fault windows directly.",
+    guidance: "In Table, find Payment timeout rate. Click Register if it is awaiting registration, or click the metric name to open Metric Insights and its Connections tab when available. Scoped replay readings opens the fault windows directly.",
     links: (data) => [
       ["Open Eye metric catalog ↗", EYE + "/#table-tab"],
       ...(data?.readings_url ? [["Scoped replay readings ↗", data.readings_url]] : [])
