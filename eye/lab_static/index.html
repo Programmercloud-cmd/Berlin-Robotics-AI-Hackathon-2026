@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eye of the System · Test Lab</title>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/theme.css">
+  <link rel="stylesheet" href="/static/lab.css">
+  <script defer src="/static/workflow.js"></script>
+  <script defer src="/static/lab.js"></script>
+  <script defer src="/static/support.js"></script>
+</head>
+<body>
+  <header class="app-bar">
+    <div class="shell app-bar-row">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Eye of the System</div>
+      <h1 class="app-bar-title">Test lab</h1>
+      <div class="app-bar-tools">
+        <nav aria-label="Local views">
+          <a href="/benchmark">Benchmark</a>
+          <a href="http://127.0.0.1:8001/">Operator panel</a>
+          <a id="eye-link" href="http://127.0.0.1:8000/" hidden>Open Eye</a>
+        </nav>
+        <button class="theme-toggle" type="button" hidden>Use dark theme</button>
+      </div>
+    </div>
+  </header>
+  <main class="shell">
+    <div class="company-tabs" role="tablist" aria-label="Companies">
+      <button type="button" role="tab" id="company-marketplace" aria-selected="true" aria-controls="marketplace-workspace">Marketplace</button>
+      <button type="button" role="tab" id="company-support" aria-selected="false" aria-controls="support-workspace" tabindex="-1">Support Tickets</button>
+    </div>
+    <div id="marketplace-workspace" role="tabpanel" aria-labelledby="company-marketplace">
+    <p class="connection" role="status"><span class="status-dot" id="status-dot"></span><span id="status">Connecting to the simulator.</span></p>
+    <section class="panel workflow" aria-labelledby="workflow">
+      <div class="workflow-heading">
+        <h2 id="workflow">Simulator ground truth</h2>
+        <span id="workflow-status" class="workflow-status" role="status" hidden></span>
+      </div>
+      <div class="flow-scroll" tabindex="0" role="region" aria-label="Simulator workflow map">
+        <div id="workflow-map" class="flow-map"></div>
+      </div>
+      <div class="workflow-details" id="workflow-details" hidden>
+        <div>
+          <section id="plan-preview" class="plan-preview" aria-label="Scenario preview" hidden></section>
+          <section id="workflow-plan" class="workflow-card" aria-label="Scenario settings" hidden></section>
+        </div>
+        <section id="workflow-readings" class="workflow-card" aria-label="Observed outcomes" hidden></section>
+      </div>
+    </section>
+    <div class="workbench">
+      <section class="panel" aria-labelledby="chat-title">
+        <h2 id="chat-title">Devin chat</h2>
+        <ol id="messages" class="messages" aria-label="Conversation"></ol>
+        <form id="chat">
+          <label for="prompt">Describe a fault premise</label>
+          <textarea id="prompt" name="prompt" required maxlength="1500" rows="3" placeholder="Product pages hosted in Frankfurt fail to load."></textarea>
+          <button id="send" disabled>Ask Devin</button>
+        </form>
+      </section>
+      <div class="sidebar">
+        <section class="panel" aria-labelledby="traffic">
+          <h2 id="traffic">Normal traffic</h2>
+          <p id="clock">Waiting for the baseline.</p>
+          <form id="normal" class="inline">
+            <label for="hours">Virtual hours</label>
+            <input id="hours" type="number" min="1" max="48" value="1" required>
+            <button id="generate" disabled>Generate traffic</button>
+          </form>
+          <button type="button" id="start-continuous" disabled>Start continuous traffic</button>
+          <button type="button" id="stop-continuous" hidden>Stop continuous traffic</button>
+          <details>
+            <summary>Replay a saved scenario</summary>
+            <form id="replay">
+              <label for="scenario-file">Scenario JSON</label>
+              <input id="scenario-file" type="file" accept=".json,application/json" required>
+              <button id="import">Review saved scenario</button>
+            </form>
+          </details>
+        </section>
+        <section class="panel" aria-labelledby="results">
+          <h2 id="results">Run timeline</h2>
+          <div id="runs"><p>Applied scenarios and generated windows appear here.</p></div>
+        </section>
+      </div>
+    </div>
+    </div>
+    <div id="support-workspace" role="tabpanel" aria-labelledby="company-support" hidden>
+      <div class="support-context">
+        <p class="connection" role="status"><span class="status-dot" id="support-status-dot"></span><span id="support-status">Connecting to the support simulator.</span></p>
+        <a id="support-eye" href="http://127.0.0.1:8004/" hidden>Open Support Eye</a>
+      </div>
+      <section class="panel" aria-labelledby="support-workflow-title">
+        <div class="workflow-heading">
+          <h2 id="support-workflow-title">Simulator ground truth</h2>
+          <span id="support-effect" class="workflow-status" hidden></span>
+        </div>
+        <div class="flow-scroll" tabindex="0" role="region" aria-label="Support ticket workflow map">
+          <div id="support-map" class="flow-map support-map">
+            <div class="flow-node support-received" data-step="received"><strong>Ticket received</strong></div>
+            <div class="flow-node flow-cohort support-queues"><strong>Queue assignment</strong><small>Standard or specialist</small></div>
+            <div class="flow-node flow-gate support-eligible"><strong>Eligible for resolution?</strong><small>Ineligible tickets leave this flow</small></div>
+            <div class="flow-node flow-authorization support-resolved" data-step="resolved"><strong>Ticket resolved</strong></div>
+            <div class="flow-node flow-outcome support-retry" data-step="retry"><strong>Retry scheduled</strong><small>Resolution still pending</small></div>
+          </div>
+        </div>
+      </section>
+      <div class="workbench">
+        <section class="panel" aria-labelledby="support-cases-title">
+          <h2 id="support-cases-title">Support cases</h2>
+          <p id="support-clock">Waiting for the baseline.</p>
+          <div class="inline">
+            <button type="button" data-support-preview="intake-surge" disabled>Preview healthy intake surge</button>
+            <button type="button" data-support-preview="specialist-regression" disabled>Preview specialist regression</button>
+          </div>
+          <section id="support-preview" class="plan-preview" aria-labelledby="support-preview-title" hidden>
+            <h3 id="support-preview-title">Scenario preview</h3>
+            <div id="support-plan"></div>
+            <div class="inline">
+              <button type="button" id="support-apply">Apply to upcoming windows</button>
+              <button type="button" id="support-close-preview" class="secondary">Close preview</button>
+            </div>
+          </section>
+          <p id="support-error" role="alert" hidden></p>
+        </section>
+        <section class="panel" aria-labelledby="support-results-title">
+          <h2 id="support-results-title">Run timeline</h2>
+          <div id="support-runs"><p>Applied support cases appear here.</p></div>
+        </section>
+      </div>
+    </div>
+  </main>
+  <p id="error" role="alert" hidden></p>
+</body>
+</html>

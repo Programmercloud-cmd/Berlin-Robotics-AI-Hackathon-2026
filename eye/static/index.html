@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eye of the System · Marketplace monitoring</title>
+  <script src="/static/theme.js"></script>
+  <link rel="stylesheet" href="/static/theme.css">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/vendor/cytoscape.min.js"></script>
+  <script defer src="/static/journey.js"></script>
+  <script defer src="/static/activity.js"></script>
+  <script defer src="/static/dashboard.js"></script>
+  <script defer src="/static/metric-insights.js"></script>
+</head>
+<body>
+  <header class="app-bar">
+    <div class="shell app-bar-row">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Eye of the System</div>
+      <h1 class="app-bar-title">Marketplace monitoring</h1>
+      <div class="app-bar-tools">
+        <div class="connection" role="status"><span class="status-dot" id="status-dot"></span><span id="status">Connecting</span></div>
+        <button class="theme-toggle" type="button" hidden>Use dark theme</button>
+      </div>
+    </div>
+  </header>
+  <main class="shell">
+    <div class="workspace-heading">
+      <div class="workspace-tabs" role="tablist" aria-label="Workspace">
+        <button type="button" id="graph-tab" role="tab" aria-controls="graph-view" aria-selected="true">Graph</button>
+        <button type="button" id="table-tab" role="tab" aria-controls="table-view" aria-selected="false" tabindex="-1">Table</button>
+      </div>
+      <div class="clock"><span>Last observed window</span><time id="window">—</time></div>
+    </div>
+    <div class="workspace" id="workspace">
+      <aside class="panel side-panel event-panel" id="event-panel" aria-labelledby="events-title">
+        <div class="panel-header">
+          <h2 id="events-title">Observed event log</h2>
+          <button type="button" class="icon-control" id="hide-events" aria-controls="event-panel" aria-label="Collapse observed event log">‹</button>
+        </div>
+        <div class="event-list" id="event-rows"><p class="placeholder">Waiting for observed events.</p></div>
+      </aside>
+      <button type="button" class="edge-toggle edge-left" id="show-events" aria-label="Expand observed event log" aria-controls="event-panel" aria-expanded="false" hidden><span class="edge-arrow" aria-hidden="true">›</span> <span>Events</span></button>
+      <div class="center-view">
+        <div id="graph-view" role="tabpanel" aria-labelledby="graph-tab">
+          <section class="panel graph-panel" id="graph-panel" aria-labelledby="graph-title">
+            <div class="panel-header company-header">
+              <div><h2 id="graph-title">Company graph</h2><span id="graph-count" class="panel-meta"></span></div>
+              <div id="inspector" class="inspector" role="status" hidden></div>
+              <button type="button" class="text-control" id="graph-fullscreen" aria-pressed="false">Fullscreen</button>
+            </div>
+            <div id="graph-incident" class="graph-incident" hidden>
+              <span id="graph-incident-scope" role="status"></span>
+              <button type="button" class="text-control" id="clear-incident">Clear selection</button>
+            </div>
+            <div class="graph-stage">
+              <div id="graph" aria-label="Interactive company graph"></div>
+              <div id="journey-lanes" class="journey-lanes" hidden></div>
+              <p class="graph-empty" id="graph-empty">Waiting for observed events</p>
+              <div class="mode-menu" id="mode-menu">
+                <button class="eye-button" type="button" id="mode-toggle" aria-label="Graph views" aria-controls="graph-modes" aria-expanded="false"><span class="eye-icon" aria-hidden="true"></span></button>
+                <div id="graph-modes" class="mode-options" aria-label="Graph views" inert>
+                  <button type="button" class="mode is-active" data-mode="overview" aria-pressed="true">Overview</button>
+                  <button type="button" class="mode" data-mode="journey" aria-pressed="false">Journey</button>
+                  <button type="button" class="mode" data-mode="workflow" aria-pressed="false">Workflow</button>
+                  <button type="button" class="mode" data-mode="all" aria-pressed="false">All links</button>
+                </div>
+              </div>
+              <div class="graph-controls" aria-label="Graph zoom">
+                <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+                <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+                <button id="fit" type="button" aria-label="Fit graph to view">Fit</button>
+              </div>
+            </div>
+            <div class="graph-footer">
+              <div class="legend" aria-label="Graph legend">
+                <span><i class="key activity"></i>Activity</span>
+                <span><i class="key metric"></i>Metric</span>
+                <span><i class="key process"></i>Lifecycle</span>
+                <span><i class="key path"></i>Investigation</span>
+              </div>
+              <div class="node-search">
+                <label class="visually-hidden" for="node-picker">Search graph nodes</label>
+                <input type="text" id="node-picker" role="combobox" aria-autocomplete="list" aria-controls="node-results" aria-expanded="false" autocomplete="off" spellcheck="false">
+                <span class="search-icon" aria-hidden="true"></span>
+                <ul id="node-results" role="listbox" aria-label="Graph nodes" hidden></ul>
+              </div>
+            </div>
+            <pre id="graph-edge-properties" class="graph-edge-properties" aria-label="Selected relationship properties" hidden></pre>
+          </section>
+        </div>
+        <section class="panel catalog-panel" id="table-view" role="tabpanel" aria-labelledby="table-tab" hidden>
+          <div class="panel-header">
+            <div><h2>Metric catalog</h2><span id="catalog-count" class="panel-meta" role="status"></span></div>
+            <label class="visually-hidden" for="catalog-filter">Filter metric catalog</label>
+            <input id="catalog-filter" type="search" placeholder="Filter metrics or sources">
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th scope="col">Metric</th><th scope="col">Source</th><th scope="col">Unit and dimensions</th><th scope="col">Readings</th><th scope="col">Alerts</th></tr></thead>
+              <tbody id="catalog-rows"></tbody>
+            </table>
+          </div>
+        </section>
+        <details id="planned-events" class="panel planned-events" open hidden>
+          <summary>Planned events</summary>
+          <div id="planned-event-readings"></div>
+        </details>
+        <section class="panel activity-panel" aria-labelledby="activity-title">
+          <div class="panel-header"><h2 id="activity-title">Activity Graph</h2></div>
+          <p id="activity-empty" class="placeholder">Investigations and their alerts appear here as Eye records them.</p>
+          <div class="activity-board" id="activity-board" tabindex="0" role="region" aria-label="Investigations and their alerts, newest first" hidden>
+            <div id="activity-map" class="activity-map"></div>
+          </div>
+        </section>
+      </div>
+      <aside class="panel side-panel signal-panel" id="signals-panel" aria-labelledby="incidents-title">
+        <div class="panel-header">
+          <div><h2 id="incidents-title">Investigations</h2><span id="incident-count" class="panel-meta"></span></div>
+          <button type="button" class="icon-control" id="hide-signals" aria-controls="signals-panel" aria-label="Collapse investigations">›</button>
+        </div>
+        <p id="incident-empty" class="placeholder">Reports appear here when the monitor detects a change.</p>
+        <div id="incident-list"></div>
+      </aside>
+      <button type="button" class="edge-toggle edge-right" id="show-signals" aria-label="Expand investigations" aria-controls="signals-panel" aria-expanded="false" hidden><span>Signals</span> <span class="edge-arrow" aria-hidden="true">‹</span></button>
+    </div>
+  </main>
+  <dialog id="metric-insights" class="metric-insights" aria-labelledby="metric-insights-title">
+    <div class="panel-header">
+      <div><h2 id="metric-insights-title">Metric Insights</h2><p class="panel-meta" id="metric-insights-description"></p></div>
+      <form method="dialog"><button type="submit" autofocus>Close</button></form>
+    </div>
+    <div class="metric-insights-body">
+      <div class="metric-insights-toolbar">
+        <label>Scope <select id="metric-insights-scope"></select></label>
+        <label>Check cadence <select id="metric-insights-cadence" disabled></select></label>
+        <button type="button" id="metric-insights-older">Older</button>
+        <button type="button" id="metric-insights-newer">Newer</button>
+        <button type="button" id="metric-insights-live">Live</button>
+      </div>
+      <p id="metric-insights-status" class="panel-meta" role="status"></p>
+      <p id="metric-insights-cadence-status" class="panel-meta" role="status" hidden></p>
+      <div id="metric-insights-chart"></div>
+      <p id="metric-insights-point" class="panel-meta"></p>
+      <div id="metric-insights-alert" aria-live="polite"></div>
+    </div>
+  </dialog>
+</body>
+</html>
