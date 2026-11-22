@@ -68,12 +68,16 @@ def make_app(dsn, model=None):
                     "select * from anomalies order by window_start desc, score desc limit 250"
                 ).fetchall(),
                 "incidents": db.execute(
-                    """select i.*, exists (
+                    """select i.id, i.metric_id, i.scope, i.opened_at, i.updated_at, g.recovered_at,
+                       i.healthy_windows, i.report, g.group_id, g.recovery_observed_at, exists (
                            select 1 from pending_reports p where p.incident_id = i.id
-                       ) as investigation_pending
-                       from incidents i order by (i.id = %s) desc nulls last,
-                           (recovered_at is null) desc, opened_at desc, id desc limit 50""",
-                    (incident,),
+                       ) as investigation_pending,
+                       (select jsonb_agg(r.decision order by r.incident_id) from incident_relationships r
+                        where r.parent_id=i.id or r.incident_id=i.id) as grouping_decisions
+                       from incidents i join incident_groups g on g.id=i.id
+                       where i.id=g.group_id or i.id=%s
+                       order by (i.id = %s) desc nulls last, (g.recovered_at is null) desc,
+                                i.opened_at desc, i.id desc limit 50""", (incident, incident),
                 ).fetchall(),
             }
 
@@ -97,18 +101,20 @@ def make_app(dsn, model=None):
     @app.get("/api/incidents/{incident_id}/evidence")
     def evidence(incident_id: int, alerts_only: bool = False):
         with connect(dsn) as db:
+            group = db.execute("select linked_incident_ids from incident_groups where id=%s", (incident_id,)).fetchone()
+            ids = [incident_id, *(group["linked_incident_ids"] if group else [])]
             if alerts_only:
                 return db.execute(
-                    """select kind, payload from evidence where incident_id = %s
+                    """select kind, payload from evidence where incident_id = any(%s)
                        and kind in ('anomaly', 'related anomaly', 'ongoing anomaly')
                        and payload ? 'id' order by window_start desc, id desc""",
-                    (incident_id,),
+                    (ids,),
                 ).fetchall()
             return db.execute(
-                """select * from evidence where incident_id = %s
-                   order by (kind in ('branch evidence', 'first observable break', 'observed events', 'anomaly')) desc,
+                """select * from evidence where incident_id = any(%s)
+                   order by (kind in ('incident grouping', 'branch evidence', 'first observable break', 'observed events', 'anomaly')) desc,
                             window_start desc, id desc limit 120""",
-                (incident_id,),
+                (ids,),
             ).fetchall()
 
     @app.get("/api/catalog")

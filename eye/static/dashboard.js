@@ -451,7 +451,10 @@ function renderIncidents() {
     selectedIncident = requestedIncident;
     requestedIncident = null;
   }
-  if (!ids.has(selectedIncident)) selectedIncident = null;
+  if (!ids.has(selectedIncident)) {
+    selectedIncident = incidents.find((item) => item.grouping_decisions?.some((decision) =>
+      decision.incident_id === selectedIncident && decision.status === "linked"))?.id ?? null;
+  }
   const list = byId("incident-list");
   for (const [id, row] of incidentRows) {
     if (ids.has(id)) continue;
@@ -546,9 +549,22 @@ function renderReport(target, incident) {
     reportSection(target, "Uncertain downstream relationships",
       "Too little evidence to attribute these changes: " + report.uncertain_relationships.join(", ") + ".");
   }
-  const recovery = incident.recovered_at ? "Recovered " + date(report.recovery_observed_at || incident.recovered_at) + " UTC."
+  const recovery = incident.recovered_at ? "Recovered " + date(incident.recovery_observed_at || report.recovery_observed_at || incident.recovered_at) + " UTC."
     : "Tracking recovery · " + incident.healthy_windows + " healthy evaluations observed.";
   reportSection(target, "Recovery", report.recovery ? recovery + " " + describe(report.recovery) : recovery);
+  if (incident.grouping_decisions?.length) {
+    const section = element("div", null, "report-section");
+    section.append(element("h3", "Incident grouping"));
+    for (const decision of incident.grouping_decisions) {
+      const other = decision.incident_id === incident.id ? decision.parent_id : decision.incident_id;
+      const row = element("p");
+      const link = element("a", "Incident " + other);
+      link.href = "?incident=" + other;
+      row.append(link, document.createTextNode(` · ${words(decision.status)}. ${decision.reason}`));
+      section.append(row);
+    }
+    target.append(section);
+  }
   renderEvidenceBranches(target, report, openBranches);
   const path = report.break?.metrics?.map((id) => "metric:" + id) || [];
   if (path.length) {

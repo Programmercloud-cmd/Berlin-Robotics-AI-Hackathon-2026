@@ -117,6 +117,33 @@ create table if not exists incidents (
 create unique index if not exists incidents_open_scope on incidents(metric_id, scope)
     where recovered_at is null;
 
+create table if not exists incident_relationships (
+    incident_id bigint primary key references incidents(id),
+    parent_id bigint not null references incidents(id),
+    status text not null check (status in ('provisional', 'linked', 'independent')),
+    observed_at timestamptz not null,
+    decision jsonb not null,
+    check (incident_id <> parent_id)
+);
+
+create or replace view incident_groups as
+select i.id,
+       coalesce(r.parent_id, i.id) as group_id,
+       coalesce(m.members, array[]::bigint[]) as linked_incident_ids,
+       case when i.recovered_at is not null and coalesce(m.all_recovered, true)
+            then greatest(i.recovered_at, m.last_recovered) end as recovered_at,
+       case when i.recovered_at is not null and coalesce(m.all_recovered, true)
+            then greatest((i.report->>'recovery_observed_at')::timestamptz, m.last_recovery_observed) end as recovery_observed_at
+from incidents i
+left join incident_relationships r on r.incident_id = i.id and r.status = 'linked'
+left join lateral (
+    select array_agg(c.id order by c.id) as members, bool_and(c.recovered_at is not null) as all_recovered,
+           max(c.recovered_at) as last_recovered,
+           max((c.report->>'recovery_observed_at')::timestamptz) as last_recovery_observed
+    from incident_relationships k join incidents c on c.id = k.incident_id
+    where k.parent_id = i.id and k.status = 'linked'
+) m on true;
+
 create table if not exists pending_reports (
     incident_id bigint primary key references incidents(id),
     context jsonb not null,

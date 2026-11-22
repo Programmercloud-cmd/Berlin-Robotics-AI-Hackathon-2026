@@ -13,7 +13,7 @@ from eye.intervals import CADENCE, HOUR, aligned_history
 from eye.investigation_branches import build_branches
 from eye.model import ask
 from eye.observation import observation_tool
-from eye.shared_incidents import COMPLETENESS, cohort_plan, source_plans
+from eye.shared_incidents import COMPLETENESS, cohort_plan, revisit_groups, source_plans
 from eye.transitions import ALERT_STEPS, BY_ID, POSITIONS, WORKFLOW, Readings, compatible
 
 log = logging.getLogger(__name__)
@@ -610,3 +610,5 @@ def track(db, start, anomalies, model=None, *, history=None, facts=None, observe
 
     others = [incident for incident in open_incidents if incident["id"] not in accounted]
     track_other(db, tool, start, baseline, others, remaining, model, good_data, observed_at)
+    if good_data and current_facts and observed_at and readings:
+        revisit_groups(db, start, observed_at, readings, current_facts)

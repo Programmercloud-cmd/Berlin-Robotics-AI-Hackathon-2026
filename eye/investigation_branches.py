@@ -555,6 +555,23 @@ def build_branches(db, incident, cutoff, baseline):
     if window and kind in {"stock", "search"}:
         if branch := matched_branch(db, incident, start, cutoff, kind):
             branches.append(branch)
+        for row in db.execute(
+            """select decision from incident_relationships where parent_id=%s and observed_at <= %s
+               order by incident_id""", (incident["id"], cutoff),
+        ).fetchall():
+            decision = row["decision"]
+            caption = decision["reason"]
+            status = decision["status"]
+            supports = [caption] if status == "linked" else []
+            if "upstream_explained" in decision:
+                supports.append(f"Linked cohorts account for an estimated {decision['upstream_explained']:.1f} of "
+                                f"{decision['scope_volume_loss']:.1f} missing {decision['metric_id'].replace('_', ' ')}.")
+                supports.append(f"Scoped completion was {decision['checked_completion_rate']:.1%} versus "
+                                f"{decision['baseline_completion_rate']:.1%} expected."
+                                if decision["checked_completion_rate"] is not None else "The comparison rate was unavailable.")
+            branches.append(hypothesis(f"Downstream incident #{decision['incident_id']}", supports,
+                                       [caption] if status == "independent" else [],
+                                       [caption] if status == "provisional" else [], evidence=decision))
     elif metric in SALES_SIGNALS:
         branches.extend(sales_branches(db, start, incident["scope"], at_detection, history, rolling=bool(window)))
     if not branches:

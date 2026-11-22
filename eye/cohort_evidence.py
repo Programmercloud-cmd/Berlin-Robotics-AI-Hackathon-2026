@@ -79,7 +79,7 @@ def compare(cohorts, rates=RATES):
     return result
 
 
-def matched_cohorts(rows, kind, start, end, scope):
+def matched_cohorts(rows, kind, start, end, scope, *, journeys=None):
     sessions, stocks = defaultdict(list), defaultdict(list)
     for row in rows:
         attrs = row["attrs"]
@@ -119,6 +119,8 @@ def matched_cohorts(rows, kind, start, end, scope):
             stratum = (attrs.get("country"), attrs.get("platform"), int(at.timestamp()) // 600)
             releases[stratum][exposed].append((attrs.get("search_release"), attrs["response_ms"]))
         following = [row for row in events if at <= row["occurred_at"] <= at + GRACE]
+        if journeys is not None:
+            journeys.append((stratum, exposed, entry, following))
         flags = {row["activity"] for row in following if row["activity"] in PATH}
         proposals = {row["id"]: row for row in following if row["activity"] == "feed_impression"}
         order = next((row for row in following if row["activity"] == "order_confirmed"), None)
@@ -152,7 +154,7 @@ def matched_cohorts(rows, kind, start, end, scope):
     return result
 
 
-def read_cohorts(db, kind, start, end, cutoff, scope, facts=None):
+def read_cohorts(db, kind, start, end, cutoff, scope, facts=None, *, journeys=None):
     activities = [*PATH, "search_requested", "feed_impression"]
     if facts:
         rows = [row for activity in activities for row in facts.following[activity]]
@@ -169,7 +171,7 @@ def read_cohorts(db, kind, start, end, cutoff, scope, facts=None):
             (start - 2 * HOUR, end, cutoff),
         ).fetchall())
     rows.sort(key=lambda row: (row["occurred_at"], row["id"]))
-    return matched_cohorts(rows, kind, start, end, scope)
+    return matched_cohorts(rows, kind, start, end, scope, journeys=journeys)
 
 
 def supports_link(kind, evidence):

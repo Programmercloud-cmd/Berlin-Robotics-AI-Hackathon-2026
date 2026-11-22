@@ -3,7 +3,10 @@
 from collections import defaultdict
 from datetime import datetime
 
+from psycopg.types.json import Jsonb
+
 from eye.cohort_evidence import graph_path, read_cohorts, supports_link
+from eye.downstream_impact import PROJECTIONS, assess, build_paths
 from eye.intervals import HOUR
 from eye.transitions import ALERT_STEPS, POSITIONS, compatible
 
@@ -103,3 +106,54 @@ def cohort_plan(db, kind, start, cutoff, alerts, incidents, workflow, facts):
                         "Search rollout cohorts share a loss of recommendation exposure and cart entry."),
             "completion_checks": [group["completion"] for group in workflow
                                   if scope_strength(scope, group["completion"]["scope"])]}
+
+
+def revisit_groups(db, start, cutoff, readings, facts):
+    """Reassess overlapping evidence edges while both incidents still describe this episode."""
+    incidents = db.execute(
+        """select i.*, r.parent_id, r.status as relationship_status from incidents i
+           left join incident_relationships r on r.incident_id=i.id
+           where opened_at >= %s and opened_at <= %s order by opened_at, id""", (start - HOUR, start),
+    ).fetchall()
+    for parent in incidents:
+        shared = parent["report"].get("shared_explanation", {})
+        kind = shared.get("kind")
+        if kind not in {"stock", "search"} or parent["recovered_at"]:
+            continue
+        children = [row for row in incidents if row["id"] != parent["id"] and not row["recovered_at"]
+                    and parent["opened_at"] <= row["opened_at"] and row["metric_id"] in PROJECTIONS
+                    and not row["report"].get("shared_explanation") and compatible(parent["scope"], row["scope"])
+                    and row["parent_id"] in (None, parent["id"]) and row["relationship_status"] != "independent"]
+        if not children:
+            continue
+        journeys = []
+        evidence = read_cohorts(db, kind, start, start + HOUR, cutoff, parent["scope"], facts, journeys=journeys)
+        if not evidence["preceded"]:
+            continue
+        supported = supports_link(kind, evidence)
+        paths = build_paths(db, journeys)
+        for child in children:
+            decision = assess(paths, kind, child, readings)
+            status = decision["status"]
+            previous = child["relationship_status"]
+            if status == "linked" and not supported:
+                status = "provisional"
+                decision.update(status=status, reason="The measured upstream change still has provisional cohort support.")
+            if previous == "linked" and status != "independent":
+                continue
+            if previous is None and status == "independent":
+                continue
+            decision.update(parent_id=parent["id"], incident_id=child["id"], window_start=start.isoformat(),
+                            observed_at=cutoff.isoformat(), upstream=kind)
+            saved = db.execute(
+                """insert into incident_relationships values (%s,%s,%s,%s,%s) on conflict (incident_id)
+                   do update set status=excluded.status, observed_at=excluded.observed_at, decision=excluded.decision
+                   where incident_relationships.parent_id=excluded.parent_id""",
+                (child["id"], parent["id"], status, cutoff, Jsonb(decision)),
+            )
+            if saved.rowcount and status != previous:
+                db.execute("insert into evidence(incident_id, window_start, kind, payload) values (%s,%s,'incident grouping',%s)",
+                           (child["id"], start, Jsonb(decision)))
+                if status in {"linked", "independent"}:
+                    db.execute("""update incidents set report=report || '{"deep_investigation":"pending"}'
+                                  where id=%s""", (parent["id"],))

@@ -91,8 +91,9 @@ def evaluate(db, run, checked_through):
         return result
 
     incident = db.execute(
-        """select i.id, i.recovered_at, (i.report->>'recovery_observed_at')::timestamptz as recovery_observed_at
-           from evidence e join incidents i on i.id = e.incident_id
+        """select g.id, g.recovered_at, g.recovery_observed_at
+           from evidence e join incident_groups k on k.id=e.incident_id
+           join incident_groups g on g.id=k.group_id
            where e.window_start = %s and e.kind in ('anomaly', 'related anomaly', 'ongoing anomaly')
              and e.payload->>'id' = %s
            order by (e.kind = 'anomaly') desc, e.id limit 1""",

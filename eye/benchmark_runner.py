@@ -101,12 +101,15 @@ def case_result(dsn, identifier, name, benign):
             """select a.metric_id, a.scope, a.window_start, a.window_end, a.observed_at, a.observed, a.expected
                from anomalies a order by a.observed_at, a.id limit 1""",
         ).fetchone()
-        incidents = db.execute(
-            """select id, metric_id, scope, report->'break'->>'label' as step,
-                      (report->>'recovery_observed_at')::timestamptz as recovered_at from incidents order by id""",
+        all_incidents = db.execute(
+            """select i.id, i.metric_id, i.scope, i.report->'break'->>'label' as step,
+                      g.recovery_observed_at as recovered_at, g.group_id, g.linked_incident_ids
+               from incidents i join incident_groups g on g.id=i.id order by i.id""",
         ).fetchall()
+        grouping_history = db.execute("select payload from evidence where kind='incident grouping' order by id").fetchall()
         reports = db.execute("select * from report_snapshots order by incident_id, phase desc").fetchall()
         pending = db.execute("select count(*) as value from pending_reports").fetchone()["value"]
+    incidents = [row for row in all_incidents if row["id"] == row["group_id"]]
     recovered = [i["recovered_at"] for i in incidents if i["recovered_at"]]
     return {
         "id": identifier, "name": name, "benign": benign,
@@ -116,7 +119,8 @@ def case_result(dsn, identifier, name, benign):
         "incident_count": len(incidents), "recovered_incidents": len(recovered),
         "recovery_minutes": (max(recovered) - START - HOUR).total_seconds() / 60
         if not benign and recovered and len(recovered) == len(incidents) else None,
-        "incidents": incidents, "reports": reports, "pending_reports": pending,
+        "incidents": incidents, "linked_incidents": [row for row in all_incidents if row["id"] != row["group_id"]],
+        "grouping_history": [row["payload"] for row in grouping_history], "reports": reports, "pending_reports": pending,
     }
 
 
