@@ -1,12 +1,14 @@
 """Broker Devin's bounded graph investigation through local observation reads."""
 
-from datetime import datetime, timedelta
+from datetime import datetime
+from statistics import fmean
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from eye.db import connect
 from eye.intervals import CADENCE, GRACE, HOUR, aligned_history
+from eye.monitor import rate_counts
 from eye.observation import observation_tool
 
 PROMPT = """You are Eye's incident investigator. Use only the bounded telemetry below. Never access
@@ -22,6 +24,8 @@ Tools and their arguments:
 - metric_definition, metric_readings, metric_breakdown: target is a metric ID without the metric: prefix.
   Readings compare the current scope with aligned historical readings. Breakdown can enumerate broader
   comparisons when given scope {}.
+- decompose_metric: target is a metric ID with a declared ratio. Quantifies how its observed
+  numerator and denominator contribute to the deviation against aligned history.
 - activity_mix: activities are event names from the metric calculation or discovered graph. Compares
   event counts against the same scoped historical hours at equal ingestion maturity.
 - supporting_events: activities are event names. Returns a few observed payloads with linked objects.
@@ -39,7 +43,7 @@ class Structured(BaseModel):
 
 class Query(Structured):
     tool: Literal["graph_neighbors", "metric_definition", "metric_readings", "metric_breakdown",
-                  "activity_mix", "supporting_events"]
+                  "activity_mix", "supporting_events", "decompose_metric"]
     reason: str = Field(min_length=1, max_length=320)
     target: str | None = Field(default=None, max_length=160)
     scope: dict[str, str] | None = None
@@ -121,6 +125,30 @@ def evidence_record(title, tool, params, signal, start, end, cutoff, entity, res
             "entity": entity, "signal": signal, "result": result, "interpretation": interpretation}
 
 
+def decompose_metric(formula, latest, historical):
+    """Split a declared ratio deviation by averaging both possible input-change orders."""
+    if formula.get("op") != "ratio" or not formula.get("denominator_activity"):
+        return {"available": False, "reason": "The metric does not declare both activities of a ratio."}
+    samples = [row for row in historical if row["value"] is not None and row["sample_size"]
+               and row["details"].get("quality") not in {"incomplete", "missing_window"}]
+    if not latest or latest[0]["value"] is None or not latest[0]["sample_size"] or not samples:
+        return {"available": False, "reason": "Observed and reference counts are required."}
+    numerator, denominator = rate_counts(latest[0])
+    expected_n, expected_d = (fmean(values) for values in zip(*(rate_counts(row) for row in samples)))
+    if min(denominator, expected_d) <= 0:
+        return {"available": False, "reason": "A zero eligible count cannot support a ratio comparison."}
+    delta = numerator / denominator - expected_n / expected_d
+    numerator_part = (numerator - expected_n) * (1 / denominator + 1 / expected_d) / 2
+    denominator_part = (numerator + expected_n) * (1 / denominator - 1 / expected_d) / 2
+    return {"available": True, "historical_windows": len(samples), "observed_rate": numerator / denominator,
+            "expected_rate": expected_n / expected_d, "rate_change": delta,
+            "numerator": {"activity": formula["activity"], "observed": numerator, "expected": expected_n,
+                          "rate_contribution": numerator_part},
+            "denominator": {"activity": formula["denominator_activity"], "observed": denominator, "expected": expected_d,
+                            "rate_contribution": denominator_part},
+            "residual": delta - numerator_part - denominator_part}
+
+
 def read_query(dsn, snapshot, read):
     start, cutoff, baseline = (datetime.fromisoformat(snapshot[key]) for key in ("start", "cutoff", "baseline"))
     scope = snapshot["scope"] if read.scope is None else read.scope
@@ -132,19 +160,22 @@ def read_query(dsn, snapshot, read):
             raise ValueError("This node was absent from the graph captured at the observation cutoff.")
         return result
     definitions = snapshot["definitions"]
-    if read.tool.startswith("metric_") and read.target not in definitions:
+    if (read.tool.startswith("metric_") or read.tool == "decompose_metric") and read.target not in definitions:
         raise ValueError("Supply a metric ID from the discovered graph.")
     if read.tool == "metric_definition":
         return definitions[read.target]
     with connect(dsn) as db:
         db.execute("set transaction read only")
         tool = observation_tool(db)
-        if read.tool == "metric_readings":
+        if read.tool in {"metric_readings", "decompose_metric"}:
             dates = aligned_history(start, baseline)
             args = {"metric_id": read.target, "scope": scope, "as_of": cutoff}
-            return {"latest": tool(read.tool, start=start, end=start + CADENCE, limit=1, **args),
-                    "aligned_reference": tool(read.tool, start=dates[-1], end=dates[0] + CADENCE,
-                                              aligned_to=start, limit=4, **args)}
+            latest = tool("metric_readings", start=start, end=start + CADENCE, limit=1, **args)
+            historical = tool("metric_readings", start=dates[-1], end=dates[0] + CADENCE,
+                              aligned_to=start, limit=4, **args)
+            if read.tool == "decompose_metric":
+                return decompose_metric(definitions[read.target]["calculation"], latest, historical)
+            return {"latest": latest, "aligned_reference": historical}
         if read.tool == "metric_breakdown":
             return tool(read.tool, metric_id=read.target, window_start=start, as_of=cutoff, scope=scope, limit=14)
         known = {item["id"].removeprefix("activity:") for item in snapshot["graph"]["nodes"]
@@ -162,7 +193,8 @@ def run(dsn, model, snapshot, record):
     evidence = list(initial)
     successful_reads = set()
     signals = {"activity_mix": "process_mix", "supporting_events": "event_match",
-               "graph_neighbors": "graph_structure", "metric_breakdown": "drilldown"}
+               "graph_neighbors": "graph_structure", "metric_breakdown": "drilldown",
+               "decompose_metric": "decomposition"}
     used_nodes = {f"metric:{snapshot['metric']}"}
 
     def respond(raw, turn):
@@ -188,7 +220,7 @@ def run(dsn, model, snapshot, record):
             records.append(entry)
             if successful:
                 successful_reads.add(entry["id"])
-                if read.target and read.tool.startswith("metric_"):
+                if read.target and (read.tool.startswith("metric_") or read.tool == "decompose_metric"):
                     used_nodes.add(f"metric:{read.target}")
                 elif read.target and read.tool == "graph_neighbors":
                     used_nodes.add(read.target)

@@ -11,7 +11,7 @@ from psycopg.types.json import Jsonb
 
 from eye.db import connect, set_state, setup
 from eye.devin import DevinReasoner
-from eye.devin_investigation import Turn
+from eye.devin_investigation import Turn, decompose_metric
 from eye.ingestion import publish_window
 from eye.investigation import matching_measurement
 from eye.intervals import DAY, GRACE, HOUR
@@ -105,3 +105,14 @@ class InvestigationTest(unittest.TestCase):
         self.assertAlmostEqual(evidence["other_observed_rate"], .9)
         self.assertAlmostEqual(evidence["unexplained_outcomes"], 0)
         self.assertIsNone(matching_measurement({**broad, "observed": .53}, narrow, definitions))
+
+    def test_ratio_decomposition_reconstructs_the_observed_change(self):
+        formula = {"op": "ratio", "activity": "resolved", "denominator_activity": "eligible"}
+        current = [{"value": .5, "sample_size": 120, "details": {}}]
+        history = [{"value": .9, "sample_size": 100, "details": {}}] * 3
+        result = decompose_metric(formula, current, history)
+        self.assertEqual(result["historical_windows"], 3)
+        self.assertAlmostEqual(result["rate_change"], -.4)
+        self.assertLess(result["numerator"]["rate_contribution"], 0)
+        self.assertLess(result["denominator"]["rate_contribution"], 0)
+        self.assertAlmostEqual(result["residual"], 0)
